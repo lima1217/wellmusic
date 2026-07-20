@@ -3,6 +3,27 @@
 .zig-cache/
 zig-out/
 
+# Local imported music / library state (never commit user media)
+media/
+library.txt
+session.txt
+*.mp3
+*.m4a
+*.wav
+*.aac
+*.flac
+*.ogg
+*.opus
+*.aiff
+*.aif
+*.wma
+cover.jpg
+cover.jpeg
+cover.png
+folder.jpg
+folder.jpeg
+folder.png
+
 # OS / editor junk
 .DS_Store
 *.swp
