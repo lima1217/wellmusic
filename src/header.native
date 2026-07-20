@@ -1,0 +1,47 @@
+<!-- The wellmusic header bar: the library switcher, theme toggle, and
+     search. Compiled at comptime (canvas.CompiledMarkupView) and composed
+     under the Zig root view next to the Zig-only sections (album grid,
+     track rows) the closed markup grammar cannot express. Theme starts
+     following the system appearance; the moon/sun control locks light or
+     dark in-app (persisted with the session). Albums/Songs is ONE
+     icon-only cycle button (glyph follows the view on screen; press
+     flips to the other). Add is ONE plus icon whose anchored dropdown
+     offers Add Song / Add Album — the sanctioned stack + dropdown-menu
+     picker shape. The search field carries the built-in trailing clear
+     affordance whenever it holds text — no external Clear button.
+     Chrome fill is applied by the Zig shell (`chromeBand`): layout
+     row/column backgrounds do not paint, so the band is a zero-radius
+     panel over the page. -->
+<column>
+  <!-- The header IS the titlebar (tall hidden-inset chrome): it is the
+       window's drag surface, leads with a spacer sized to the traffic
+       lights via on_chrome, and matches its height to the titlebar band
+       so its controls and the lights share a centerline. -->
+  <row height="{header_height}" padding="12" gap="12" cross="center" window-drag="true" label="WellMusic header">
+    <spacer width="{chrome_leading}" />
+    <!-- Band contents: only working controls — the library switcher
+         leads after the window controls, Add and theme sit beside it,
+         search holds the trailing corner, and the stretch between them
+         stays bare drag surface. -->
+    <button size="sm" variant="ghost" icon="{libraryViewIcon}" on-press="toggle_library_view" label="Switch library view"></button>
+    <stack>
+      <button size="sm" variant="ghost" icon="plus" selected="{add_menu_open}" on-press="toggle_add_menu" label="Add to library"></button>
+      <if test="{add_menu_open}">
+        <dropdown-menu anchor="below" anchor-alignment="start" anchor-offset="4" on-dismiss="close_add_menu">
+          <menu-item icon="music" on-press="add_music">Add Song</menu-item>
+          <menu-item icon="folder" on-press="import_album">Add Album</menu-item>
+        </dropdown-menu>
+      </if>
+    </stack>
+    <button size="sm" variant="ghost" icon="{themeIcon}" on-press="toggle_theme" label="Toggle light or dark theme"></button>
+    <spacer grow="1" />
+    <!-- One size register per row: search matches the sm tab buttons so
+         the band's controls share one height. -->
+    <search-field size="sm" text="{search}" placeholder="Search albums, artists, songs…" width="280" on-input="search_edit" label="Search library" />
+    <!-- The leading spacer's trailing twin: zero on macOS, sized to the
+         min/max/close cluster on Windows so search clears the buttons. -->
+    <spacer width="{chrome_trailing}" />
+  </row>
+  <!-- No hairline under the header: chrome-vs-page fill already
+       separates the band (shadows-over-borders). -->
+</column>
