@@ -48,38 +48,67 @@ const CfKeys = struct {
 var cf_keys: ?CfKeys = null;
 
 /// Platform-bridge publish cache — not Model state, not part of replay.
-/// Remembers the last published (title ptr+len, playing, elapsed seconds)
-/// so ~20 Hz scrubber rebuilds skip identical `setNowPlayingInfo:` work.
+/// Remembers the last published content fingerprint (title/artist hashes,
+/// duration, playing, elapsed seconds) so ~20 Hz scrubber rebuilds skip
+/// identical `setNowPlayingInfo:` work. Hashes (not ptr+len) so in-place
+/// edits of the same storage still republish.
 const PublishCache = struct {
-    title_ptr: [*]const u8 = undefined,
-    title_len: usize = 0,
+    title_hash: u64 = 0,
+    artist_hash: u64 = 0,
+    duration_ms: u32 = 0,
     playing: bool = false,
     elapsed_s: u32 = 0,
     valid: bool = false,
+
+    fn matches(
+        self: PublishCache,
+        title_hash: u64,
+        artist_hash: u64,
+        duration_ms: u32,
+        playing: bool,
+        elapsed_s: u32,
+    ) bool {
+        return self.valid and
+            self.title_hash == title_hash and
+            self.artist_hash == artist_hash and
+            self.duration_ms == duration_ms and
+            self.playing == playing and
+            self.elapsed_s == elapsed_s;
+    }
+
+    fn remember(
+        title_hash: u64,
+        artist_hash: u64,
+        duration_ms: u32,
+        playing: bool,
+        elapsed_s: u32,
+    ) PublishCache {
+        return .{
+            .title_hash = title_hash,
+            .artist_hash = artist_hash,
+            .duration_ms = duration_ms,
+            .playing = playing,
+            .elapsed_s = elapsed_s,
+            .valid = true,
+        };
+    }
 };
 var last_publish: PublishCache = .{};
+
+fn sliceHash(bytes: []const u8) u64 {
+    return std.hash.Wyhash.hash(0, bytes);
+}
 
 pub fn publish(title: []const u8, artist: []const u8, duration_ms: u32, elapsed_ms: u32, playing: bool) void {
     if (comptime builtin.os.tag != .macos) return;
     if (comptime builtin.is_test) return;
     const elapsed_s = elapsed_ms / 1000;
-    if (last_publish.valid and
-        last_publish.title_ptr == title.ptr and
-        last_publish.title_len == title.len and
-        last_publish.playing == playing and
-        last_publish.elapsed_s == elapsed_s)
-    {
-        return;
-    }
+    const title_hash = sliceHash(title);
+    const artist_hash = sliceHash(artist);
+    if (last_publish.matches(title_hash, artist_hash, duration_ms, playing, elapsed_s)) return;
     ensureInstalled();
     if (!macPublish(title, artist, duration_ms, elapsed_ms, playing)) return;
-    last_publish = .{
-        .title_ptr = title.ptr,
-        .title_len = title.len,
-        .playing = playing,
-        .elapsed_s = elapsed_s,
-        .valid = true,
-    };
+    last_publish = PublishCache.remember(title_hash, artist_hash, duration_ms, playing, elapsed_s);
 }
 
 pub fn clear() void {
@@ -308,4 +337,22 @@ test "utf8TruncateLen does not split a 4-byte emoji" {
     try std.testing.expectEqual(@as(usize, 0), utf8TruncateLen(s, 3));
     try std.testing.expectEqual(@as(usize, 4), utf8TruncateLen(s, 4));
     try std.testing.expectEqual(@as(usize, 5), utf8TruncateLen(s, 5));
+}
+
+test "publish cache misses on duration artist or title content change" {
+    const title_a = sliceHash("Song A");
+    const title_b = sliceHash("Song B"); // same length, different bytes
+    const artist_a = sliceHash("Artist");
+    const artist_b = sliceHash("Writer");
+    const cached = PublishCache.remember(title_a, artist_a, 0, true, 0);
+
+    try std.testing.expect(cached.matches(title_a, artist_a, 0, true, 0));
+    // Platform duration adopt 0 → N must republish.
+    try std.testing.expect(!cached.matches(title_a, artist_a, 180_000, true, 0));
+    // Artist edit must republish even when title/elapsed/playing match.
+    try std.testing.expect(!cached.matches(title_a, artist_b, 0, true, 0));
+    // In-place same-length title edit changes the hash.
+    try std.testing.expect(!cached.matches(title_b, artist_a, 0, true, 0));
+    try std.testing.expect(!cached.matches(title_a, artist_a, 0, false, 0));
+    try std.testing.expect(!cached.matches(title_a, artist_a, 0, true, 1));
 }
