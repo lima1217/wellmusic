@@ -25,6 +25,7 @@ const model_mod = @import("model.zig");
 const theme = @import("theme.zig");
 const view_mod = @import("view.zig");
 const media_session = @import("media_session.zig");
+const ui_font = @import("ui_font.zig");
 
 pub const Model = model_mod.Model;
 pub const Msg = model_mod.Msg;
@@ -126,6 +127,31 @@ pub fn boot(model: *Model, fx: *model_mod.Effects) void {
 
 pub const WellMusicApp = native_sdk.UiApp(Model, Msg);
 
+/// Filled once after `ui_font.load` so `Options.fonts` can borrow a
+/// stable slice for the installing-frame registration.
+var ui_font_regs: [1]WellMusicApp.FontRegistration = undefined;
+var ui_font_reg_count: usize = 0;
+
+/// Platform lifecycle flag — not Model state. The SDK copies
+/// `Options.fonts` during the installing frame (before any `on_frame`);
+/// after that copy, the app-side ~23 MB buffer is redundant. Freed on
+/// the first `onFrame` callback; see `ui_font.releaseBytes`.
+var ui_font_bytes_released: bool = false;
+
+fn prepareUiFonts() void {
+    ui_font.load(std.heap.page_allocator);
+    if (!ui_font.ready()) {
+        ui_font_reg_count = 0;
+        return;
+    }
+    ui_font_regs[0] = .{
+        .id = ui_font.font_id,
+        .name = ui_font.name(),
+        .ttf = ui_font.faceBytes(),
+    };
+    ui_font_reg_count = 1;
+}
+
 pub fn wellMusicOptions() WellMusicApp.Options {
     return .{
         .name = "wellmusic",
@@ -135,6 +161,7 @@ pub fn wellMusicOptions() WellMusicApp.Options {
         .view = rootView,
         .init_fx = boot,
         .tokens_fn = tokensFromModel,
+        .fonts = ui_font_regs[0..ui_font_reg_count],
         .on_appearance = onAppearance,
         .on_chrome = onChrome,
         .on_command = onCommand,
@@ -255,8 +282,19 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 /// Remote-command targets are not wired in `media_session` (ObjC bridge
 /// ABI is too fragile). Playback control rides the status-item menu
 /// (`statusItem`), projection commands (`onCommand`), and focused media
-/// keys (`onKey`). This frame hook only carries the canvas-width channel.
+/// keys (`onKey`). This frame hook only carries the canvas-width channel
+/// plus a one-shot free of the UI-face buffer after registration.
+///
+/// Timing: `UiApp` registers `Options.fonts` exactly once on the
+/// installing frame (copies the TTF bytes; see FontRegistration.ttf),
+/// and that rebuild runs before any `on_frame` present. So the first
+/// `onFrame` is safe to drop `ui_font.loaded_bytes` — `ui_font_regs`
+/// may still hold a dangling slice, but the SDK never re-reads it.
 pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
+    if (!ui_font_bytes_released) {
+        ui_font_bytes_released = true;
+        ui_font.releaseBytes(std.heap.page_allocator);
+    }
     if (frame.size.width != model.canvas_width) {
         return Msg{ .canvas_resized = frame.size.width };
     }
@@ -363,6 +401,7 @@ pub fn initModel() Model {
     // before any view builds (registration is idempotent — one static
     // table — so the test harness's own install never conflicts).
     registerIcons();
+    prepareUiFonts();
     var model: Model = .{ .canvas_width = model_mod.compact_seed_canvas_width };
     // Streaming configuration, resolved once at boot exactly like the
     // desktop main() below — replay's deterministic-init contract holds
@@ -508,6 +547,7 @@ pub fn mobileOptions() WellMusicApp.Options {
         .view = rootView,
         .init_fx = boot,
         .tokens_fn = tokensFromModel,
+        .fonts = ui_font_regs[0..ui_font_reg_count],
         .on_appearance = onAppearance,
         .on_chrome = onChrome,
         .on_command = onCommand,
@@ -525,6 +565,7 @@ pub fn mobileOptions() WellMusicApp.Options {
 
 pub fn main(init: std.process.Init) !void {
     registerIcons();
+    prepareUiFonts();
     // Streaming configuration, resolved once at launch: the env URL
     // base overrides the manifest's committed one (so a locally served
     // pack needs no re-prepare), and the platform caches directory
@@ -599,5 +640,6 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = @import("tests.zig");
     _ = @import("metadata.zig");
+    _ = @import("ui_font.zig");
     _ = @import("media_session.zig");
 }

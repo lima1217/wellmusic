@@ -2,11 +2,13 @@
 //! pink scale. The pack resolves the whole register (palette, control
 //! tables, type scale, metrics) per scheme and contrast; the app layers
 //! ONE brand decision on top through `DesignTokenOverrides` — it never
-//! forks the pack. High-contrast requests skip the override and take the
-//! pack's high-contrast register untouched (accessibility beats brand),
-//! and reduce-motion zeroes the motion tokens through the theme options.
+//! forks the pack. High-contrast requests skip the accent override and
+//! take the pack's high-contrast register (accessibility beats brand),
+//! but still adopt the CJK-capable UI face when one was loaded at boot.
+//! Reduce-motion zeroes the motion tokens through the theme options.
 
 const native_sdk = @import("native_sdk");
+const ui_font = @import("ui_font.zig");
 
 const canvas = native_sdk.canvas;
 const Color = canvas.Color;
@@ -204,25 +206,67 @@ fn accentOverridesFor(color_scheme: canvas.ColorScheme) canvas.DesignTokenOverri
     };
 }
 
-pub fn tokens(scheme: native_sdk.ColorScheme, high_contrast: bool, reduce_motion: bool) canvas.DesignTokens {
+/// Stamp the CJK-capable face onto resolved tokens at RUNTIME only.
+/// `light_colors` / `dark_colors` stay comptime (palette assertions) and
+/// must not touch the boot-loaded face.
+///
+/// Intentionally leaves `mono_font_id` alone: no CJK text currently
+/// renders through the mono slot (timestamps / tabular numbers stay on
+/// Geist Mono). Cover mono too if titles ever move there.
+fn withUiFont(base: canvas.DesignTokens) canvas.DesignTokens {
+    if (!ui_font.ready()) return base;
+    return base.withOverrides(.{
+        .typography = .{
+            .font_id = ui_font.font_id,
+            .button_font_id = ui_font.font_id,
+            .font_family = .system_sans,
+        },
+    });
+}
+
+/// Pure standard-contrast Geist register + brand accents. Comptime-safe:
+/// no runtime font state. Shared by `tokens` and the exported palettes so
+/// pack / accent choices cannot drift apart.
+fn standardTokens(scheme: canvas.ColorScheme) canvas.DesignTokens {
+    return resolveGeist(scheme, .standard, false);
+}
+
+fn resolveGeist(scheme: canvas.ColorScheme, contrast: canvas.ColorContrast, reduce_motion: bool) canvas.DesignTokens {
     const options = canvas.ThemeOptions{
         .pack = .geist,
-        .color_scheme = switch (scheme) {
-            .light => .light,
-            .dark => .dark,
-        },
-        .contrast = if (high_contrast) .high else .standard,
+        .color_scheme = scheme,
+        .contrast = contrast,
         .reduce_motion = reduce_motion,
     };
     // High contrast takes the pack's own loud register with no brand
     // layer: white on the pink fill sits at ~5.1:1, well under the
     // loud-contrast bar, so the accent honestly bows out.
-    if (high_contrast) return canvas.DesignTokens.theme(options);
-    return canvas.DesignTokens.themeWithOverrides(options, accentOverridesFor(options.color_scheme));
+    if (contrast == .high) return canvas.DesignTokens.theme(options);
+    return canvas.DesignTokens.themeWithOverrides(options, accentOverridesFor(scheme));
+}
+
+pub fn tokens(scheme: native_sdk.ColorScheme, high_contrast: bool, reduce_motion: bool) canvas.DesignTokens {
+    const color_scheme: canvas.ColorScheme = switch (scheme) {
+        .light => .light,
+        .dark => .dark,
+    };
+    // High contrast: pack loud register, still stamp the UI face —
+    // readable CJK beats brand pink.
+    if (high_contrast) return withUiFont(resolveGeist(color_scheme, .high, reduce_motion));
+    // Standard contrast: share `standardTokens` when motion is live;
+    // with reduce_motion, re-resolve so ThemeOptions still zeroes motion
+    // through the pack before accent overrides layer on top (same order
+    // as the pre-refactor themeWithOverrides path).
+    const base = if (reduce_motion)
+        resolveGeist(color_scheme, .standard, true)
+    else
+        standardTokens(color_scheme);
+    return withUiFont(base);
 }
 
 /// The resolved standard-contrast palettes, exported for the suite's
 /// theme assertions: the pack's scheme register with the accent
-/// override already applied — exactly what `tokens` hands the runtime.
-pub const light_colors = tokens(.light, false, false).colors;
-pub const dark_colors = tokens(.dark, false, false).colors;
+/// override already applied — exactly what `tokens` hands the runtime
+/// before the optional UI-face stamp.
+pub const light_colors = standardTokens(.light).colors;
+pub const dark_colors = standardTokens(.dark).colors;

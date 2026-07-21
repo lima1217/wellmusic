@@ -7,6 +7,7 @@ const native_sdk = @import("native_sdk");
 const main = @import("main.zig");
 const model_mod = @import("model.zig");
 const theme = @import("theme.zig");
+const ui_font = @import("ui_font.zig");
 const view_mod = @import("view.zig");
 
 const canvas = native_sdk.canvas;
@@ -552,6 +553,28 @@ test "light and dark schemes keep page and chrome one step apart" {
     // Body ink keeps an honest lightness gap on the lifted page.
     try testing.expectEqual(canvas.Color.rgb8(22, 22, 22), theme.light_colors.text);
     try testing.expectEqual(canvas.Color.rgb8(238, 238, 238), theme.dark_colors.text);
+}
+
+test "without a loaded UI face tokens keep the pack default font" {
+    // The suite never calls prepareUiFonts, so ready() stays false and
+    // typography must not silently pick up the registered-slot id.
+    try testing.expect(!ui_font.ready());
+    const pack_default = canvas.DesignTokens.theme(.{
+        .pack = .geist,
+        .color_scheme = .light,
+    }).typography.font_id;
+    const resolved = theme.tokens(.light, false, false).typography.font_id;
+    try testing.expectEqual(pack_default, resolved);
+    try testing.expect(resolved != ui_font.font_id);
+}
+
+test "high contrast skips the pink accent and takes the pack loud register" {
+    const pack_high = canvas.DesignTokens.theme(.{
+        .pack = .geist,
+        .color_scheme = .light,
+        .contrast = .high,
+    });
+    try testing.expectEqualDeep(pack_high.colors, theme.tokens(.light, true, false).colors);
 }
 
 test "chrome geometry pads the header and matches its height to the tall band" {
