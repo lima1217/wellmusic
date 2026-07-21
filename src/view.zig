@@ -752,12 +752,18 @@ fn rowMutedTokens(row: *const model_mod.TrackRow) canvas.StyleTokenRefs {
 /// paused (the icon names the state, matching the transport button's
 /// convention) — and the track number everywhere else. Icons are
 /// decoration (never hit-tested), so the row's press handling is
-/// untouched; the fixed 24px slot keeps the number column's alignment.
+/// untouched; the fixed 24px slot is a shared column — numbers are
+/// center-aligned so their glyph axis matches the centered icons.
 /// On the selected row the icon takes the inverted ink like the text —
 /// an accent glyph would vanish into the accent fill.
 fn trackIndicator(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
     if (!row.now) {
-        return ui.text(.{ .width = 24, .size = .sm, .style_tokens = rowMutedTokens(row) }, row.number);
+        return ui.text(.{
+            .width = 24,
+            .size = .sm,
+            .text_alignment = .center,
+            .style_tokens = rowMutedTokens(row),
+        }, row.number);
     }
     const icon_tokens: canvas.StyleTokenRefs = if (row.selected)
         .{ .foreground = .accent_text }
