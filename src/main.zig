@@ -252,20 +252,13 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 /// presents delivers the new one and the corrected grid is on screen
 /// a frame later.
 ///
-/// While playing, drain macOS remote-command buttons on whatever frames
-/// the scrubber timer already woke — paused/idle control rides the
-/// status-item menu and focused media keys.
+/// Remote-command targets are not wired in `media_session` (ObjC bridge
+/// ABI is too fragile). Playback control rides the status-item menu
+/// (`statusItem`), projection commands (`onCommand`), and focused media
+/// keys (`onKey`). This frame hook only carries the canvas-width channel.
 pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     if (frame.size.width != model.canvas_width) {
         return Msg{ .canvas_resized = frame.size.width };
-    }
-    if (model.playing and model.now != null and !model.buffering) {
-        switch (media_session.poll()) {
-            .none => {},
-            .toggle_play => return .{ .media_command = .toggle_play },
-            .next => return .{ .media_command = .next },
-            .previous => return .{ .media_command = .previous },
-        }
     }
     return null;
 }
@@ -606,4 +599,5 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = @import("tests.zig");
     _ = @import("metadata.zig");
+    _ = @import("media_session.zig");
 }
