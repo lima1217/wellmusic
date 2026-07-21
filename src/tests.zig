@@ -31,6 +31,19 @@ fn apply(model: *Model, msg: Msg) void {
     main.update(model, msg, &fx);
 }
 
+fn applyFx(model: *Model, msg: Msg, fx: *model_mod.Effects) void {
+    main.update(model, msg, fx);
+}
+
+fn scrubberTimerPending(fx: *model_mod.Effects) bool {
+    var i: usize = 0;
+    while (i < fx.pendingTimerCount()) : (i += 1) {
+        const timer = fx.pendingTimerAt(i) orelse continue;
+        if (timer.key == model_mod.scrubber_timer_key) return true;
+    }
+    return false;
+}
+
 fn findByText(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.Widget {
     if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget;
     for (widget.children) |child| {
@@ -773,4 +786,108 @@ test "media command keys map through onKey" {
     try testing.expectEqual(Msg{ .media_command = .next }, next.?);
     const prev = main.onKey(.{ .key = "F7", .phase = .key_down, .modifiers = .{} });
     try testing.expectEqual(Msg{ .media_command = .previous }, prev.?);
+}
+
+test "scrubber timer starts on play and cancels on pause or audio failure" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/scrubber.mp3"));
+    const id = model.user_tracks[0].id;
+
+    applyFx(&model, .{ .play_track = id }, &fx);
+    try testing.expect(model.playing);
+    try testing.expect(scrubberTimerPending(&fx));
+    try testing.expectEqual(model_mod.scrubber_interval_ms, fx.pendingTimerAt(0).?.interval_ms);
+
+    applyFx(&model, .toggle_play, &fx);
+    try testing.expect(!model.playing);
+    try testing.expect(!scrubberTimerPending(&fx));
+
+    applyFx(&model, .toggle_play, &fx);
+    try testing.expect(model.playing);
+    try testing.expect(scrubberTimerPending(&fx));
+
+    applyFx(&model, .{ .audio_event = .{ .key = id, .kind = .failed } }, &fx);
+    try testing.expectEqual(@as(?u8, null), model.now);
+    try testing.expect(!model.playing);
+    try testing.expect(!scrubberTimerPending(&fx));
+}
+
+test "scrubber tick advances elapsed_ms by the scrubber interval" {
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/scrubber.mp3"));
+    const id = model.user_tracks[0].id;
+    apply(&model, .{ .play_track = id });
+    try testing.expectEqual(@as(u32, 0), model.elapsed_ms);
+
+    apply(&model, .{ .scrubber_tick = .{
+        .key = model_mod.scrubber_timer_key,
+        .timestamp_ns = 0,
+        .outcome = .fired,
+    } });
+    try testing.expectEqual(@as(u32, model_mod.scrubber_interval_ms), model.elapsed_ms);
+}
+
+test "scrubber timer arming does not leak across Model instances" {
+    var fx_a = model_mod.Effects.init(testing.allocator);
+    defer fx_a.deinit();
+    fx_a.executor = .fake;
+    var model_a: Model = .{};
+    try testing.expect(model_a.addUserTrack("/tmp/wellmusic-test/a.mp3"));
+    applyFx(&model_a, .{ .play_track = model_a.user_tracks[0].id }, &fx_a);
+    try testing.expect(scrubberTimerPending(&fx_a));
+
+    // Fresh Model + Effects must still arm — a module-level armed flag
+    // left true by model_a would skip startTimer here.
+    var fx_b = model_mod.Effects.init(testing.allocator);
+    defer fx_b.deinit();
+    fx_b.executor = .fake;
+    var model_b: Model = .{};
+    try testing.expect(model_b.addUserTrack("/tmp/wellmusic-test/b.mp3"));
+    applyFx(&model_b, .{ .play_track = model_b.user_tracks[0].id }, &fx_b);
+    try testing.expect(scrubberTimerPending(&fx_b));
+}
+
+test "scrubber timer reject degrades for the session and retries after pause" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/scrubber.mp3"));
+    const id = model.user_tracks[0].id;
+
+    applyFx(&model, .{ .play_track = id }, &fx);
+    try testing.expect(scrubberTimerPending(&fx));
+    try testing.expect(model.scrubber_timer_armed);
+    try testing.expect(!model.scrubber_degraded);
+
+    applyFx(&model, .{ .scrubber_tick = .{
+        .key = model_mod.scrubber_timer_key,
+        .timestamp_ns = 0,
+        .outcome = .rejected,
+    } }, &fx);
+    try testing.expect(!model.scrubber_timer_armed);
+    try testing.expect(model.scrubber_degraded);
+    // Reject means no live timer; clear any pre-reject fake slot so a
+    // silent re-arm would be visible as a new pending timer.
+    fx.cancelTimer(model_mod.scrubber_timer_key);
+    try testing.expect(!scrubberTimerPending(&fx));
+
+    applyFx(&model, .toggle_library_view, &fx);
+    try testing.expect(model.playing);
+    try testing.expect(model.scrubber_degraded);
+    try testing.expect(!model.scrubber_timer_armed);
+    try testing.expect(!scrubberTimerPending(&fx));
+
+    applyFx(&model, .toggle_play, &fx);
+    try testing.expect(!model.playing);
+    try testing.expect(!model.scrubber_degraded);
+    applyFx(&model, .toggle_play, &fx);
+    try testing.expect(model.playing);
+    try testing.expect(model.scrubber_timer_armed);
+    try testing.expect(scrubberTimerPending(&fx));
 }

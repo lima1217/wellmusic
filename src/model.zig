@@ -344,12 +344,11 @@ pub const ThemePreference = enum {
     }
 };
 
-/// One presented frame's clock, delivered through `on_frame` WHILE
-/// PLAYING ONLY (main.zig gates it): the timestamp advances the rendered
-/// playback clock between the player's coarse position ticks, and the
-/// display's frame interval bounds the advance when frames were
-/// irregular (occlusion, a resume after pause), so a stale gap can never
-/// lurch the scrubber.
+/// One presented frame's clock. Historically delivered through `on_frame`
+/// at display rate while playing; the live path now drives the same
+/// advance from a ~20 Hz fx timer (`scrubber_tick`) so playback does not
+/// keep a full Metal present loop warm. Tests and journals may still
+/// send `frame_clock` directly.
 pub const FrameClock = struct {
     timestamp_ns: u64,
     interval_ns: u64,
@@ -361,6 +360,12 @@ pub const FrameClock = struct {
 /// full tick means reality changed (an external seek, a stall the
 /// buffering flag has not reported yet), and honesty beats smoothness.
 const position_snap_slack_ms: u32 = 600;
+
+/// Scrubber / now-playing clock while audio moves. 50 ms ≈ 20 Hz: smooth
+/// enough for the seek bar, far cheaper than tying the canvas to the
+/// display refresh for the whole track.
+pub const scrubber_timer_key: u64 = 42;
+pub const scrubber_interval_ms: u64 = 50;
 
 pub const Msg = union(enum) {
     show_albums,
@@ -404,10 +409,13 @@ pub const Msg = union(enum) {
     /// Enter through the app-level key fallback: play the selected
     /// track (toggling pause when it is already the loaded one).
     play_selected,
-    /// One presented frame while playing (`on_frame` gates it): advances
-    /// the rendered playback clock so the scrubber moves every frame,
-    /// not every 500 ms position tick.
+    /// One presented frame while playing: advances the rendered playback
+    /// clock so the scrubber moves between coarse position ticks. Kept
+    /// for tests/journals; the live app prefers `scrubber_tick`.
     frame_clock: FrameClock,
+    /// ~20 Hz fx timer while playing: same clock advance as `frame_clock`,
+    /// without sustaining a display-rate Metal present loop.
+    scrubber_tick: native_sdk.EffectTimer,
     toggle_play,
     next_track,
     prev_track,
@@ -487,6 +495,7 @@ pub const Msg = union(enum) {
         "open_album",     "close_album",    "play_album",
         "play_track",     "select_track",   "select_next",
         "select_previous", "play_selected", "frame_clock",
+        "scrubber_tick",
         "audio_event",    "grid_scrolled",  "detail_scrolled",
         "songs_scrolled", "queue_track",    "copy_title",
         "copied",         "remove_track",   "edit_track",
@@ -604,6 +613,16 @@ pub const Model = struct {
     /// the audio events' buffering flag so the bar can show the honest
     /// third state between playing and paused. Local files never set it.
     buffering: bool = false,
+    /// Armed when `startTimer` for the scrubber is live. Starting an
+    /// already active fx timer re-arms it (and would starve fires if
+    /// called every update), so transitions only flip this flag. Lives
+    /// on the Model so tests and journal replay stay isolated.
+    scrubber_timer_armed: bool = false,
+    /// Set when the scrubber timer was rejected (table full, no platform
+    /// timer service). Blocks re-arm for the rest of this play session so
+    /// reject → retry cannot loop; cleared when playback no longer wants
+    /// the timer (pause / stop / buffer).
+    scrubber_degraded: bool = false,
     /// The streaming URL base: the manifest's committed value (the
     /// hosted catalog mirror, so streaming works out of the box) until
     /// main overrides it from NATIVE_SDK_MUSIC_URL_BASE. Empty means
@@ -691,6 +710,7 @@ pub const Model = struct {
         "elapsed_ms",      "frame_ns",       "now_duration_ms",
         "platform_duration_ms",
         "assets_missing",  "stream_failed",  "buffering",
+        "scrubber_timer_armed", "scrubber_degraded",
         "url_base_len",    "cache_dir_len",  "queue_dropped",
         "seek_fraction",   "volume",
         "copies_done",    "copy_failed",
@@ -2222,6 +2242,7 @@ fn applyCoverBytes(model: *Model, fx: *Effects, album_id: u8, bytes: []const u8)
 // ------------------------------------------------------------------ update
 
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
+    defer syncScrubberTimer(model, fx);
     switch (msg) {
         .show_albums => {
             model.tab = .albums;
@@ -2313,6 +2334,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.selected) |id| playOrToggle(model, fx, id);
         },
         .frame_clock => |frame| advanceRenderedClock(model, frame),
+        .scrubber_tick => |timer| {
+            if (timer.outcome == .rejected) {
+                model.scrubber_timer_armed = false;
+                model.scrubber_degraded = true;
+                return;
+            }
+            if (timer.outcome != .fired) return;
+            advanceRenderedClock(model, .{
+                .timestamp_ns = timer.timestamp_ns,
+                .interval_ns = scrubber_interval_ms * std.time.ns_per_ms,
+            });
+        },
         .toggle_play => {
             if (model.now == null) {
                 if (model.user_track_count > 0) {
@@ -2665,12 +2698,35 @@ fn moveSelection(model: *Model, step: SelectionStep) void {
     if (target) |id| model.selected = id;
 }
 
+/// Arm or disarm the ~20 Hz scrubber timer so the seek bar advances
+/// without a display-rate Metal loop. Idempotent: only start/cancel on
+/// edge transitions (re-arming every update would starve fires). When
+/// the host rejected the timer, stay disarmed for this play session
+/// (`scrubber_degraded`) and clear that latch once `want` falls.
+fn syncScrubberTimer(model: *Model, fx: *Effects) void {
+    const want = model.playing and model.now != null and !model.buffering;
+    if (!want) model.scrubber_degraded = false;
+    const effective = want and !model.scrubber_degraded;
+    if (effective == model.scrubber_timer_armed) return;
+    model.scrubber_timer_armed = effective;
+    if (effective) {
+        fx.startTimer(.{
+            .key = scrubber_timer_key,
+            .interval_ms = scrubber_interval_ms,
+            .mode = .repeating,
+            .on_fire = Effects.timerMsg(.scrubber_tick),
+        });
+    } else {
+        fx.cancelTimer(scrubber_timer_key);
+    }
+}
+
 /// One presented frame while playing: advance the rendered clock by the
 /// real frame delta, clamped to a few display intervals so a stale gap
 /// (resume after pause, an occluded window, boot) steps gently instead
 /// of lurching, and capped at the duration. Motion-gated twice — the
-/// `on_frame` hook only emits the Msg while playing, and this re-checks
-/// so a replayed journal straddling a pause boundary stays exact.
+/// live timer / `on_frame` hook only emit while playing, and this
+/// re-checks so a replayed journal straddling a pause boundary stays exact.
 fn advanceRenderedClock(model: *Model, frame: FrameClock) void {
     const last = model.frame_ns;
     model.frame_ns = frame.timestamp_ns;

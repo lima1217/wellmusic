@@ -239,41 +239,33 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
     return Msg{ .set_appearance = appearance };
 }
 
-/// The per-frame hook carries two channels, both gated so the idle law
-/// holds (an idle app presents zero frames):
+/// The per-frame hook carries the album grid's width channel only.
+/// Playback clock advances come from the ~20 Hz `scrubber_tick` timer
+/// in the model (not display-rate presents), so an idle or paused app
+/// presents zero frames and a playing app stays near 20 Hz instead of
+/// locking the Metal surface to the panel refresh.
 ///
-/// 1. The album grid's width channel: a WIDTH CHANGE (a live window
-///    resize, fullscreen) dispatches into the model so the grid
-///    re-derives its column count on the very next rebuild. The
-///    one-frame lag is inherent and invisible: the resize-triggered
-///    rebuild still lays out with the previous width, then the frame it
-///    presents delivers the new one and the corrected grid is on screen
-///    a frame later.
+/// A WIDTH CHANGE (live resize, fullscreen) dispatches into the model
+/// so the grid re-derives its column count on the very next rebuild.
+/// The one-frame lag is inherent and invisible: the resize-triggered
+/// rebuild still lays out with the previous width, then the frame it
+/// presents delivers the new one and the corrected grid is on screen
+/// a frame later.
 ///
-/// 2. The smooth-scrubber frame clock, WHILE PLAYING ONLY: each
-///    presented frame's timestamp advances the rendered playback clock
-///    (`advanceRenderedClock`), whose changed scrubber presents the
-///    next frame — the dispatch loop sustains itself exactly as long as
-///    audio moves. Pause, stop, buffering, or idle return null, the
-///    display list stops changing, and the frame channel starves on its
-///    own: zero frames while nothing moves, with no arming flag to
-///    forget to clear.
+/// While playing, drain macOS remote-command buttons on whatever frames
+/// the scrubber timer already woke — paused/idle control rides the
+/// status-item menu and focused media keys.
 pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     if (frame.size.width != model.canvas_width) {
         return Msg{ .canvas_resized = frame.size.width };
     }
-    // Drain macOS remote-command buttons while the display loop is
-    // already awake (playing). Paused/idle control rides the status-item
-    // menu and focused media keys — waking the idle law for a poll
-    // would burn frames for nothing.
-    switch (media_session.poll()) {
-        .none => {},
-        .toggle_play => return .{ .media_command = .toggle_play },
-        .next => return .{ .media_command = .next },
-        .previous => return .{ .media_command = .previous },
-    }
     if (model.playing and model.now != null and !model.buffering) {
-        return Msg{ .frame_clock = .{ .timestamp_ns = frame.timestamp_ns, .interval_ns = frame.frame_interval_ns } };
+        switch (media_session.poll()) {
+            .none => {},
+            .toggle_play => return .{ .media_command = .toggle_play },
+            .next => return .{ .media_command = .next },
+            .previous => return .{ .media_command = .previous },
+        }
     }
     return null;
 }
