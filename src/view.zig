@@ -192,6 +192,7 @@ fn editAlbumDialog(ui: *Ui, model: *const Model) Ui.Node {
 fn desktopShell(ui: *Ui, model: *const Model) Ui.Node {
     return ui.column(.{ .grow = 1 }, .{
         chromeBand(ui, CompiledHeaderView.build(ui, model)),
+        libraryNoticeBand(ui, model),
         // Paint the middle with the page token — layout backgrounds do
         // not fill, and relying on GPU clear alone left the body one
         // frame (or one rebuild path) behind chrome after a theme flip.
@@ -199,6 +200,34 @@ fn desktopShell(ui: *Ui, model: *const Model) Ui.Node {
         if (model.queue_open) queuePanel(ui, model) else ui.el(.stack, .{}, .{}),
         chromeBand(ui, CompiledNowPlayingView.build(ui, model)),
     });
+}
+
+fn libraryNoticeBand(ui: *Ui, model: *const Model) Ui.Node {
+    const text: []const u8 = switch (model.library_notice) {
+        .none, .cancelled => return ui.el(.stack, .{}, .{}),
+        .added => ui.fmt("Added {d} track{s}", .{
+            model.library_notice_count,
+            if (model.library_notice_count == 1) "" else "s",
+        }),
+        .removed => "Removed from library",
+        .full => "Library is full",
+        .failed => "That didn’t work. Try again.",
+        .updated => "Saved",
+    };
+    return chromeBand(ui, ui.row(.{
+        .padding = 12,
+        .gap = 12,
+        .cross = .center,
+        .semantics = .{ .label = "Library status" },
+    }, .{
+        ui.text(.{ .grow = 1 }, text),
+        ui.button(.{
+            .variant = .ghost,
+            .size = .sm,
+            .on_press = .dismiss_library_notice,
+            .semantics = .{ .label = "Dismiss status" },
+        }, "Dismiss"),
+    }));
 }
 
 /// Full-bleed chrome over the page fill. Layout `row`/`column` backgrounds
@@ -239,7 +268,7 @@ fn queuePanel(ui: *Ui, model: *const Model) Ui.Node {
         if (rows.len == 0)
             ui.column(.{ .padding = 12, .gap = 4 }, .{
                 ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Playlist is empty."),
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Play an album, or right-click a track → Play Next"),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Play an album, double-click a track, or right-click → Play Next"),
             })
         else
             ui.column(.{ .padding = 12, .gap = 2 }, .{
@@ -294,7 +323,6 @@ fn albumGridView(ui: *Ui, model: *const Model) Ui.Node {
         .on_scroll = Ui.scrollMsg(.grid_scrolled),
         .semantics = .{ .label = "Album grid" },
     }, ui.column(.{ .padding = content_padding, .gap = 20 }, .{
-        sectionHeading(ui, "Albums"),
         if (cells.len == 0) emptyState(ui, model) else albumGrid(ui, gridFit(model.canvas_width), cells),
     }));
 }
@@ -489,16 +517,16 @@ fn detailHeading(ui: *Ui, model: *const Model, album: model_mod.Album, track_cou
 /// idiom the moment icon-in-button landed.) Both shells share the
 /// control.
 fn backButton(ui: *Ui) Ui.Node {
-    // Visible label is "Albums" — the familiar macOS/iOS back pattern
-    // (destination name, not "Back to…"). Semantics keep the fuller
-    // phrase for VoiceOver.
+    // Icon-only chevron: visible label is empty; VoiceOver still gets
+    // "Back to albums". `.default` size keeps the 40pt desktop hit-area
+    // floor once the text no longer widens the control.
     return ui.button(.{
         .variant = .ghost,
-        .size = .sm,
+        .size = .default,
         .icon = "chevron-left",
         .on_press = .close_album,
         .semantics = .{ .label = "Back to albums" },
-    }, "Albums");
+    }, "");
 }
 
 fn playAlbumButton(ui: *Ui, album_id: u8) Ui.Node {
@@ -646,14 +674,3 @@ fn durationText(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
 }
 
 // ---------------------------------------------------------------- shared
-
-fn sectionHeading(ui: *Ui, title: []const u8) Ui.Node {
-    // Intrinsic width: layout measures with the bundled face's real
-    // advances and the packet host draws the engine's lines verbatim,
-    // so the old slack-width workaround (needed when the estimator
-    // diverged from real glyph metrics) is gone. Scale 1.55: section
-    // presence without competing with the album-detail display title.
-    return ui.paragraph(.{ .semantics = .{ .label = title } }, &.{
-        .{ .text = title, .weight = .bold, .scale = 1.55 },
-    });
-}

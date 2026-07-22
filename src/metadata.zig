@@ -100,7 +100,10 @@ fn parseId3(bytes: []const u8, out: *ProbeBuffers) void {
     const major = bytes[3];
     if (major < 2 or major > 4) return;
     const tag_size = synchsafe(bytes[6..10]);
-    if (tag_size == 0 or 10 + tag_size > bytes.len) return;
+    if (tag_size == 0) return;
+    // Embedded artwork often makes the declared tag larger than the
+    // probe window. Parse whatever frames fit in the buffer — TIT2/TPE1
+    // almost always precede APIC — instead of bailing on an incomplete tag.
     var offset: usize = 10;
     // Skip extended header (v2.3/v2.4 flag bit 6).
     if (bytes[5] & 0x40 != 0) {
@@ -484,4 +487,60 @@ test "missing file yields empty probe" {
     const probed = probeFile("/tmp/wellmusic-definitely-missing-track.mp3");
     try std.testing.expectEqual(@as(usize, 0), probed.title_len);
     try std.testing.expectEqual(@as(u32, 0), probed.duration_ms);
+}
+
+test "id3v2 still reads title when declared tag exceeds probe window" {
+    // TIT2 first, then claim a huge tag size (as if APIC artwork followed).
+    var body: [128]u8 = undefined;
+    var len: usize = 0;
+    const title = "Partial Window Title";
+    @memcpy(body[len .. len + 4], "TIT2");
+    len += 4;
+    const payload_len: u8 = @intCast(1 + title.len);
+    body[len] = 0;
+    body[len + 1] = 0;
+    body[len + 2] = 0;
+    body[len + 3] = payload_len;
+    len += 4;
+    body[len] = 0;
+    body[len + 1] = 0;
+    len += 2;
+    body[len] = 0; // encoding
+    len += 1;
+    @memcpy(body[len .. len + title.len], title);
+    len += title.len;
+
+    var tag: [256]u8 = undefined;
+    tag[0] = 'I';
+    tag[1] = 'D';
+    tag[2] = '3';
+    tag[3] = 3;
+    tag[4] = 0;
+    tag[5] = 0;
+    // Declare a 200KB tag — larger than the 64KB probe read.
+    const claimed: usize = 200 * 1024;
+    tag[6] = @intCast((claimed >> 21) & 0x7f);
+    tag[7] = @intCast((claimed >> 14) & 0x7f);
+    tag[8] = @intCast((claimed >> 7) & 0x7f);
+    tag[9] = @intCast(claimed & 0x7f);
+    @memcpy(tag[10 .. 10 + len], body[0..len]);
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const path = "zig-out/metadata-id3-partial-test.mp3";
+    {
+        const pad = [_]u8{ 0xff, 0xfb, 0x90, 0x00 } ** 8;
+        var payload: [512]u8 = undefined;
+        @memcpy(payload[0 .. 10 + len], tag[0 .. 10 + len]);
+        @memcpy(payload[10 + len .. 10 + len + pad.len], &pad);
+        try std.Io.Dir.cwd().writeFile(io, .{
+            .sub_path = path,
+            .data = payload[0 .. 10 + len + pad.len],
+        });
+    }
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const probed = probeFile(path);
+    try std.testing.expectEqualStrings(title, probed.title[0..probed.title_len]);
 }

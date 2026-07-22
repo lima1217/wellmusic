@@ -21,9 +21,9 @@ native dev
 
 ## Playback
 
-- Double-click a track (or Enter on the selection) to play. Transport: previous / play-pause / next / play-mode cycle, and volume.
+- Double-click a track (or Enter on the selection) to play — that track is also appended to the playlist. Transport: previous / play-pause / next / play-mode cycle, and volume.
 - **Play Album** starts the first track and replaces the playlist with every track on the album. In list-loop mode the playlist wraps; sequential stops after the last track.
-- Right-click → **Play Next** appends to the playlist; the list icon at the trailing edge of the now-playing bar toggles the playlist panel (also in the menu-bar ♪ status item).
+- Right-click → **Play Next** appends to the playlist without starting playback; the list icon at the trailing edge of the now-playing bar toggles the playlist panel (also in the menu-bar ♪ status item).
 - Menu bar ♪ status item: Play/Pause, Next, Previous, Show/Hide Queue.
 - Media keys / F7–F9 when the window is focused. Now Playing metadata is published to the system when possible.
 
@@ -39,5 +39,5 @@ native dev
 
 ## Change cover
 
-- On any album: right-click the album tile or the detail cover → **Change Cover…**, or click **Change cover** on the album detail page.
-- Pick a PNG / JPEG / WebP / GIF; the cover is stored with the library and shown on the album tile, detail page, and now-playing bar.
+- On any album: right-click the album tile or the detail cover → **Change Cover…**.
+- Pick a PNG / JPEG / WebP / GIF (not HEIC); the cover is stored with the library and shown on the album tile, detail page, and now-playing bar. Large photos are automatically scaled down to fit the display budget.

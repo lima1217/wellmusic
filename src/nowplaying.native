@@ -5,36 +5,41 @@
      rebuilds while playing. The title/artist lines double as the status
      surface: a failed load swaps in the assets-not-prepared notice so
      the user knows to run the prepare script.
-     Transport: prev/next/mode stay ghost peers; play/pause is the ONE
-     primary filled control (Apple Music hierarchy — the commit action
-     is obvious at a glance). Icon-only buttons via the button icon
-     attribute: each control is ONE hit target whose icon follows the
-     enabled/disabled tint. Default (not sm) clears Geist's 40pt desktop
-     hit-area floor. Play/pause binds icon="{playPauseIcon}"; play-mode
-     cycles after next (icon="{playModeIcon}"). Volume carries its fraction
-     on `volume_changed: f32`. Volume and the ALWAYS-VISIBLE
-     queue toggle sit at the trailing edge (icon selected while the panel
-     is open — discoverable even when empty).
-     Cover uses radius md so it shares the library's rounded-square
-     language (not a pill). Chrome fill is applied by the Zig shell
-     (`chromeBand`): layout row/column backgrounds do not paint. -->
+
+     Three equal-balance zones (Apple Music / Spotify convention):
+       leading  — cover + title/artist
+       center   — prev / play-pause / next (the only primary filled control)
+       trailing — play-mode, volume, always-visible queue toggle
+     Matching grow on the leading and trailing rows keeps the transport
+     optically mid-bar; utilities stay discoverable at the trailing edge.
+     Uniform gaps inside each zone (no asymmetric prev↔play vs play↔next).
+     Default (not sm) clears Geist's 40pt desktop hit-area floor.
+     Chrome fill is applied by the Zig shell (`chromeBand`): layout
+     row/column backgrounds do not paint. Cover uses radius md so it
+     shares the library's rounded-square language (not a pill). -->
 <column>
   <!-- No hairline above the transport: chrome-vs-page fill already
        separates the band (shadows-over-borders). -->
-  <row height="80" padding="14" gap="14" cross="center" label="Now playing bar">
-    <avatar image="{nowPlayingCover}" width="52" height="52" radius="md" label="Now playing cover">{nowPlayingInitials}</avatar>
-    <column grow="1" gap="2">
-      <text label="Now playing title">{nowPlayingTitle}</text>
-      <text size="sm" foreground="text_muted">{nowPlayingArtist}</text>
-    </column>
-    <row gap="6" cross="center">
+  <row height="80" padding="14" gap="16" cross="center" label="Now playing bar">
+    <row grow="1" gap="12" cross="center" label="Now playing track">
+      <avatar image="{nowPlayingCover}" width="52" height="52" radius="md" label="Now playing cover">{nowPlayingInitials}</avatar>
+      <column grow="1" gap="2">
+        <text label="Now playing title">{nowPlayingTitle}</text>
+        <text size="sm" foreground="text_muted">{nowPlayingArtist}</text>
+      </column>
+    </row>
+    <row gap="8" cross="center" label="Transport">
       <button variant="ghost" icon="skip-back" disabled="{idle}" on-press="prev_track" label="Previous track"></button>
       <button variant="primary" icon="{playPauseIcon}" on-press="toggle_play" label="Play or pause"></button>
       <button variant="ghost" icon="skip-forward" disabled="{idle}" on-press="next_track" label="Next track"></button>
-      <button variant="ghost" icon="{playModeIcon}" on-press="cycle_play_mode" label="Cycle play mode"></button>
     </row>
-    <icon name="volume" width="14" height="14" foreground="text_muted" />
-    <slider width="88" value="{volumeFraction}" on-change="volume_changed" label="Volume" />
-    <button variant="ghost" icon="app:queue" selected="{queue_open}" on-press="toggle_queue" label="Toggle play-next queue"></button>
+    <row grow="1" gap="10" cross="center" main="end" label="Playback utilities">
+      <button variant="ghost" icon="{playModeIcon}" on-press="cycle_play_mode" label="Cycle play mode"></button>
+      <row gap="6" cross="center" label="Volume">
+        <icon name="volume" width="14" height="14" foreground="text_muted" />
+        <slider width="88" value="{volumeFraction}" on-change="volume_changed" label="Volume" />
+      </row>
+      <button variant="ghost" icon="app:queue" selected="{queue_open}" on-press="toggle_queue" label="Toggle play-next queue"></button>
+    </row>
   </row>
 </column>

@@ -356,6 +356,8 @@ test "import copies audio into the media directory and remove deletes it" {
     const managed = model.user_tracks[0].path();
     try testing.expect(std.mem.startsWith(u8, managed, media_root));
     try testing.expect(model_mod.localAudioReadable(managed));
+    // Untagged import must keep the original basename, not "t1".
+    try testing.expectEqualStrings("wellmusic-import-source", model.user_tracks[0].title());
     // Original can go away; managed copy remains playable.
     std.Io.Dir.deleteFileAbsolute(io, source) catch {};
     try testing.expect(model_mod.localAudioReadable(managed));
@@ -367,6 +369,83 @@ test "import copies audio into the media directory and remove deletes it" {
     try testing.expect(model.removeUserTrack(id));
     try testing.expectEqual(@as(usize, 0), model.user_track_count);
     try testing.expect(!model_mod.localAudioReadable(managed_copy));
+}
+
+test "import with media dir never titles a track as t{id}" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const media_root = "/tmp/wellmusic-media-title-test";
+    const source = "/tmp/My Favorite Song.flac";
+    const managed = "/tmp/wellmusic-media-title-test/t1.flac";
+    {
+        var file = try std.Io.Dir.createFileAbsolute(io, source, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "fLaC");
+    }
+    defer std.Io.Dir.deleteFileAbsolute(io, source) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, managed) catch {};
+
+    var model = Model{};
+    model.setMediaDir(media_root);
+    try testing.expect(model_mod.importAudioFromSource(&model, model_mod.imported_album_id, source));
+    try testing.expectEqualStrings("My Favorite Song", model.user_tracks[0].title());
+    try testing.expect(std.mem.indexOf(u8, model.user_tracks[0].path(), "/t1.flac") != null);
+}
+
+test "refreshTitlesFromMedia heals managed basename fallbacks when tags appear" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const managed = "/tmp/wellmusic-refresh-t1.mp3";
+    defer std.Io.Dir.deleteFileAbsolute(io, managed) catch {};
+
+    // Minimal ID3v2.3 with TIT2 only (same shape as metadata.zig unit test).
+    var body: [64]u8 = undefined;
+    var len: usize = 0;
+    const title = "Recovered Title";
+    @memcpy(body[len .. len + 4], "TIT2");
+    len += 4;
+    const payload_len: u8 = @intCast(1 + title.len);
+    body[len] = 0;
+    body[len + 1] = 0;
+    body[len + 2] = 0;
+    body[len + 3] = payload_len;
+    len += 4;
+    body[len] = 0;
+    body[len + 1] = 0;
+    len += 2;
+    body[len] = 0;
+    len += 1;
+    @memcpy(body[len .. len + title.len], title);
+    len += title.len;
+
+    var tag: [128]u8 = undefined;
+    tag[0] = 'I';
+    tag[1] = 'D';
+    tag[2] = '3';
+    tag[3] = 3;
+    tag[4] = 0;
+    tag[5] = 0;
+    tag[6] = 0;
+    tag[7] = 0;
+    tag[8] = 0;
+    tag[9] = @intCast(len);
+    @memcpy(tag[10 .. 10 + len], body[0..len]);
+    {
+        var file = try std.Io.Dir.createFileAbsolute(io, managed, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, tag[0 .. 10 + len]);
+    }
+
+    var model = Model{};
+    try testing.expect(model.addUserTrack(managed));
+    // Simulate the pre-fix bug: title left as managed basename.
+    model.user_tracks[0].setTitle("wellmusic-refresh-t1");
+    try testing.expect(model.refreshTitlesFromMedia());
+    try testing.expectEqualStrings("Recovered Title", model.user_tracks[0].title());
 }
 
 test "migrateExternalMedia copies legacy absolute paths into media/" {
@@ -411,13 +490,19 @@ test "play mode cycles between list loop and sequential" {
     apply(&model, .cycle_play_mode);
     try testing.expectEqual(model_mod.PlayMode.list_loop, model.play_mode);
 
-    // List loop wraps the album on completion.
+    // Double-click play appends to the playlist; list loop wraps that list.
+    apply(&model, .{ .play_track = a });
+    apply(&model, .{ .play_track = b });
     apply(&model, .{ .play_track = c });
+    try testing.expectEqual(@as(usize, 3), model.queue_len);
+    try testing.expectEqual(a, model.queue[0]);
+    try testing.expectEqual(b, model.queue[1]);
+    try testing.expectEqual(c, model.queue[2]);
     apply(&model, .{ .audio_event = .{ .key = c, .kind = .completed } });
     try testing.expectEqual(@as(?u8, a), model.now);
     try testing.expect(model.playing);
 
-    // Sequential stops on the last track; next on the last is a no-op.
+    // Sequential stops on the last playlist track; next on the last is a no-op.
     model.play_mode = .sequential;
     apply(&model, .{ .play_track = c });
     apply(&model, .{ .audio_event = .{ .key = c, .kind = .completed } });
@@ -431,12 +516,17 @@ test "play mode cycles between list loop and sequential" {
     apply(&model, .next_track);
     try testing.expectEqual(@as(?u8, b), model.now);
 
-    // Play Next still wins when the current track is not in the playlist.
+    // When the current track is not in the playlist, album order resumes;
+    // Play Next still wins as a one-shot FIFO ahead of that.
     model.play_mode = .list_loop;
-    apply(&model, .{ .play_track = a });
-    apply(&model, .{ .queue_track = c });
+    apply(&model, .clear_queue);
+    try testing.expectEqual(@as(usize, 0), model.queue_len);
+    try testing.expectEqual(@as(?u8, b), model.now);
     apply(&model, .next_track);
     try testing.expectEqual(@as(?u8, c), model.now);
+    apply(&model, .{ .queue_track = a });
+    apply(&model, .next_track);
+    try testing.expectEqual(@as(?u8, a), model.now);
 }
 
 test "the system appearance drives the custom tokens live" {
@@ -822,4 +912,52 @@ test "track enter motion stays off while paused so session restore cannot arm th
     try testing.expect(main.trackEnterMotionActive(true, 0));
     try testing.expect(main.trackEnterMotionActive(true, 420));
     try testing.expect(!main.trackEnterMotionActive(true, 421));
+}
+
+test "oversized cover downscales into the canvas image slot" {
+    // Phone photos and typical album art exceed the SDK's 512×512 RGBA
+    // registerImageBytes budget; loadCoverFromPath must decode with a
+    // larger scratch, shrink, then registerImage.
+    var live = try LiveApp.start(true);
+    defer live.stop();
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const media_root = "/tmp/wellmusic-cover-oversize-media";
+    const source = "/tmp/wellmusic-cover-oversize.png";
+    const managed = "/tmp/wellmusic-cover-oversize-media/c1.png";
+    defer std.Io.Dir.deleteFileAbsolute(io, source) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, managed) catch {};
+
+    const width: usize = 600;
+    const height: usize = 600;
+    const pixels = try testing.allocator.alloc(u8, width * height * 4);
+    defer testing.allocator.free(pixels);
+    @memset(pixels, 200);
+
+    const png_len = try canvas.png.encodedRgba8ByteLen(width, height);
+    const png_buf = try testing.allocator.alloc(u8, png_len);
+    defer testing.allocator.free(png_buf);
+    var png_writer = std.Io.Writer.fixed(png_buf);
+    try canvas.png.writeRgba8(&png_writer, width, height, pixels);
+    {
+        var file = try std.Io.Dir.createFileAbsolute(io, source, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, png_writer.buffered());
+    }
+
+    const model = &live.app_state.model;
+    model.setMediaDir(media_root);
+    try testing.expect(model.ensureLibraryAlbum());
+    const album_id = model_mod.imported_album_id;
+    try testing.expect(model_mod.importCoverFromSource(model, album_id, source));
+    try testing.expect(model_mod.loadCoverFromPath(model, &live.app_state.effects, album_id));
+    try testing.expect(model.coverFor(album_id) != 0);
+    try testing.expect(model.library_notice != .failed);
+
+    const info = live.harness.runtime.registeredCanvasImage(album_id).?;
+    try testing.expectEqual(@as(usize, model_mod.max_cover_register_edge), info.width);
+    try testing.expectEqual(@as(usize, model_mod.max_cover_register_edge), info.height);
 }

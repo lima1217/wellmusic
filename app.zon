@@ -4,7 +4,7 @@
     .display_name = "WellMusic",
     .description = "A native music library: browse, play, add, and remove your tracks.",
     .version = "0.1.0",
-    .icons = .{"assets/icon.png"},
+    .icons = .{ "assets/icon.icns", "assets/icon.png" },
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },

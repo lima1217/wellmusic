@@ -1,0 +1,31 @@
+--- a/src/primitives/canvas/widget_render_controls.zig
++++ b/src/primitives/canvas/widget_render_controls.zig
+@@ -764,9 +764,13 @@
+         // Leading icon slot: shared row metrics, one tint with the
+         // label — the same contract list rows draw with.
+         const icon_extent = widgetRowIconExtent(widget, tokens);
++        // Optical alignment: mixed-case labels sit on the x-height
++        // center, a hair below the row's geometric midline. Drop the
++        // glyph by the icon↔text step so icon and label share one eye
++        // line (geometric center alone reads top-heavy).
+         const icon_frame = geometry.RectF.init(
+             widget.frame.x + text_inset,
+-            widget.frame.y + (widget.frame.height - icon_extent) * 0.5,
++            widget.frame.y + (widget.frame.height - icon_extent) * 0.5 + widgetSizedDensityValue(widget, tokens, tokens.metrics.icon_text_step),
+             icon_extent,
+             icon_extent,
+         );
+@@ -792,10 +796,11 @@
+         if (icon_model.resolve("check")) |check_icon| {
+             // The commit marker: right-aligned inside the reserved slot,
+             // in the row's own content tint. Slots 12/13 sit clear of
+-            // the leading icon's shape range (4..11).
++            // the leading icon's shape range (4..11). Same optical
++            // nudge as the leading icon so the row stays one eye line.
+             const check_frame = geometry.RectF.init(
+                 widget.frame.maxX() - text_inset - check_extent,
+-                widget.frame.y + (widget.frame.height - check_extent) * 0.5,
++                widget.frame.y + (widget.frame.height - check_extent) * 0.5 + widgetSizedDensityValue(widget, tokens, tokens.metrics.icon_text_step),
+                 check_extent,
+                 check_extent,
+             );

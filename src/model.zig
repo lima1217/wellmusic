@@ -67,6 +67,16 @@ pub const max_session_store_bytes = 4 * 1024;
 /// Cover reads use `cover_read_key_base + album_id` so concurrent loads
 /// stay attributable when several albums restore covers at once.
 pub const cover_read_key_base: u64 = 100;
+/// Encoded cover file ceiling for the sync load path. Larger than the
+/// `fx.readFile` 1 MiB bound so phone photos can be imported; the pixels
+/// are then downscaled to `max_cover_register_edge` before registration.
+pub const max_cover_file_bytes: usize = 32 * 1024 * 1024;
+/// Longest edge accepted from the platform decoder before we refuse.
+/// 4096² RGBA ≈ 64 MiB temporary decode scratch.
+pub const max_cover_decode_edge: usize = 4096;
+/// Longest edge registered into the canvas image slot. Matches the SDK
+/// `max_registered_canvas_image_pixel_bytes` avatar/icon budget (512²).
+pub const max_cover_register_edge: usize = 512;
 pub const library_store_header_v1 = "wellmusic-library v1";
 pub const library_store_header_v2 = "wellmusic-library v2";
 pub const library_store_header = "wellmusic-library v3";
@@ -222,7 +232,8 @@ pub const UserTrack = struct {
 // -------------------------------------------------------------- capacities
 
 /// Playlist capacity: large enough for every imported track so Play Album
-/// can show the whole record. Play Next appends into the same list.
+/// can show the whole record. Play Next and double-click / Enter play
+/// append into the same list.
 pub const max_queue = max_user_tracks;
 /// The header bar's natural height, and the floor `header_height` falls
 /// back to when no titlebar band overlays the content (fullscreen,
@@ -403,6 +414,8 @@ pub const Msg = union(enum) {
     close_edit_album,
     /// Album / cover menu: pick a new cover image for this album.
     change_cover: u8,
+    /// Clear the transient library status banner.
+    dismiss_library_notice,
     /// Persist / restore the user library file.
     library_done: native_sdk.EffectFileResult,
     /// Persist / restore playback session (now, queue, mode, volume).
@@ -426,6 +439,7 @@ pub const Msg = union(enum) {
         "edit_album",     "edit_title",     "edit_artist",
         "save_edit_track", "close_edit_track",
         "save_edit_album", "close_edit_album", "change_cover",
+        "dismiss_library_notice",
         "library_done",   "cover_done",     "volume_changed",
         "toggle_queue",   "remove_queued",  "clear_queue",
         "media_command",
@@ -497,7 +511,8 @@ pub const Model = struct {
     /// re-arming every update cannot starve fires. Model-owned for
     /// test / journal isolation.
     audio_poll_armed: bool = false,
-    /// Playlist (Play Album fills it with the whole record; Play Next appends).
+    /// Playlist (Play Album fills it with the whole record; Play Next and
+    /// double-click / Enter play append).
     queue: [max_queue]u8 = @splat(0),
     queue_len: usize = 0,
     queue_dropped: u32 = 0,
@@ -1002,6 +1017,18 @@ pub const Model = struct {
 
     /// Import one absolute audio path into a specific album.
     pub fn addUserTrackToAlbum(model: *Model, album_id: u8, path: []const u8) bool {
+        return model.addUserTrackToAlbumNamed(album_id, path, path);
+    }
+
+    /// Like `addUserTrackToAlbum`, but when tags are missing the title falls
+    /// back to `name_path`'s basename (the original import source), not the
+    /// managed `media/t{id}` copy path.
+    pub fn addUserTrackToAlbumNamed(
+        model: *Model,
+        album_id: u8,
+        path: []const u8,
+        name_path: []const u8,
+    ) bool {
         if (path.len == 0 or path.len > max_user_path) return false;
         if (model.user_track_count >= max_user_tracks) return false;
         if (model.pathAlreadyImported(path)) return false;
@@ -1020,7 +1047,7 @@ pub const Model = struct {
         if (meta.title_len > 0) {
             track.setTitle(meta.title[0..meta.title_len]);
         } else {
-            track.setTitle(titleFromPath(path));
+            track.setTitle(titleFromPath(name_path));
         }
         if (meta.artist_len > 0) track.setArtist(meta.artist[0..meta.artist_len]);
         if (meta.duration_ms > 0) track.duration_ms = meta.duration_ms;
@@ -1037,6 +1064,34 @@ pub const Model = struct {
             }
         }
         return true;
+    }
+
+    /// Re-probe tracks whose title still equals the path basename (the
+    /// managed `t{id}` fallback, or a tagless import). Fills title/artist/
+    /// duration when the probe now succeeds — heals libraries imported
+    /// before large-ID3 parsing worked.
+    pub fn refreshTitlesFromMedia(model: *Model) bool {
+        var changed = false;
+        for (model.user_tracks[0..model.user_track_count]) |*track| {
+            const path = track.path();
+            const current = track.title();
+            const fallback = titleFromPath(path);
+            if (current.len > 0 and !std.mem.eql(u8, current, fallback)) continue;
+            const meta = metadata.probeFile(path);
+            if (meta.title_len > 0) {
+                track.setTitle(meta.title[0..meta.title_len]);
+                changed = true;
+            }
+            if (meta.artist_len > 0 and track.artist().len == 0) {
+                track.setArtist(meta.artist[0..meta.artist_len]);
+                changed = true;
+            }
+            if (meta.duration_ms > 0 and track.duration_ms == 0) {
+                track.duration_ms = meta.duration_ms;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     pub fn removeUserTrack(model: *Model, id: u8) bool {
@@ -1578,7 +1633,9 @@ pub fn importAudioFromSource(model: *Model, album_id: u8, source: []const u8) bo
     const dest = mediaDestPath(model, 't', id, source, &dest_buf) orelse return false;
     if (model.pathAlreadyImported(dest)) return false;
     if (!copySourceToManagedPath(source, dest)) return false;
-    if (!model.addUserTrackToAlbum(album_id, dest)) {
+    // Title fallback must use the original source basename ("Song.mp3"),
+    // never the managed copy ("t1.mp3").
+    if (!model.addUserTrackToAlbumNamed(album_id, dest, source)) {
         deleteManagedMediaFile(model, dest);
         return false;
     }
@@ -1849,21 +1906,16 @@ fn pickAndSetCover(model: *Model, fx: *Effects, album_id: u8) void {
         return;
     }
     persistLibrary(model, fx);
-    requestCoverLoad(model, fx, album_id);
+    if (!loadCoverFromPath(model, fx, album_id)) {
+        model.library_notice = .failed;
+        return;
+    }
+    model.library_notice = .updated;
+    model.library_notice_count = 1;
 }
 
 fn requestCoverLoad(model: *Model, fx: *Effects, album_id: u8) void {
-    const album = model.userAlbumByIdMut(album_id) orelse return;
-    if (album.cover_path_len == 0) {
-        album.cover = 0;
-        _ = fx.unregisterImage(album_id);
-        return;
-    }
-    fx.readFile(.{
-        .key = coverReadKey(album_id),
-        .path = album.coverPath(),
-        .on_result = Effects.fileMsg(.cover_done),
-    });
+    _ = loadCoverFromPath(model, fx, album_id);
 }
 
 fn requestAllCoverLoads(model: *Model, fx: *Effects) void {
@@ -1888,14 +1940,146 @@ fn applySessionResume(model: *Model, fx: *Effects) void {
     setPlaying(model, fx, false);
 }
 
-fn applyCoverBytes(model: *Model, fx: *Effects, album_id: u8, bytes: []const u8) bool {
+/// Read the album's cover file, decode via the platform codec, downscale
+/// to the canvas image slot budget, and register pixels under `album_id`.
+/// Returns false when the file cannot be turned into a registered image.
+pub fn loadCoverFromPath(model: *Model, fx: *Effects, album_id: u8) bool {
     const album = model.userAlbumByIdMut(album_id) orelse return false;
-    _ = fx.registerImageBytes(album_id, bytes) catch {
+    if (album.cover_path_len == 0) {
+        album.cover = 0;
+        _ = fx.unregisterImage(album_id);
+        return true;
+    }
+    const encoded = readCoverFileBytes(album.coverPath()) orelse {
+        album.cover = 0;
+        return false;
+    };
+    defer std.heap.page_allocator.free(encoded);
+    return registerCoverEncoded(model, fx, album_id, encoded);
+}
+
+fn readCoverFileBytes(path: []const u8) ?[]u8 {
+    if (path.len == 0) return null;
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var file = if (std.fs.path.isAbsolute(path))
+        std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null
+    else
+        std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    const size = (file.stat(io) catch return null).size;
+    if (size == 0 or size > max_cover_file_bytes) return null;
+    const len: usize = @intCast(size);
+    const buf = std.heap.page_allocator.alloc(u8, len) catch return null;
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    const n = reader.interface.readSliceShort(buf) catch {
+        std.heap.page_allocator.free(buf);
+        return null;
+    };
+    if (n != buf.len) {
+        std.heap.page_allocator.free(buf);
+        return null;
+    }
+    return buf;
+}
+
+fn fitCoverSize(src_w: usize, src_h: usize) struct { w: usize, h: usize } {
+    const max = max_cover_register_edge;
+    if (src_w == 0 or src_h == 0) return .{ .w = 0, .h = 0 };
+    if (src_w <= max and src_h <= max) return .{ .w = src_w, .h = src_h };
+    if (src_w >= src_h) {
+        return .{
+            .w = max,
+            .h = @max(1, (src_h * max) / src_w),
+        };
+    }
+    return .{
+        .w = @max(1, (src_w * max) / src_h),
+        .h = max,
+    };
+}
+
+fn downscaleRgba(
+    src: []const u8,
+    src_w: usize,
+    src_h: usize,
+    dst: []u8,
+    dst_w: usize,
+    dst_h: usize,
+) void {
+    var y: usize = 0;
+    while (y < dst_h) : (y += 1) {
+        const sy = y * src_h / dst_h;
+        var x: usize = 0;
+        while (x < dst_w) : (x += 1) {
+            const sx = x * src_w / dst_w;
+            const si = (sy * src_w + sx) * 4;
+            const di = (y * dst_w + x) * 4;
+            dst[di..][0..4].* = src[si..][0..4].*;
+        }
+    }
+}
+
+fn registerCoverEncoded(model: *Model, fx: *Effects, album_id: u8, encoded: []const u8) bool {
+    const album = model.userAlbumByIdMut(album_id) orelse return false;
+    if (encoded.len == 0) {
+        album.cover = 0;
+        return false;
+    }
+
+    if (fx.services) |services| {
+        const decode_bytes = max_cover_decode_edge * max_cover_decode_edge * 4;
+        const decode_buf = std.heap.page_allocator.alloc(u8, decode_bytes) catch {
+            album.cover = 0;
+            return false;
+        };
+        defer std.heap.page_allocator.free(decode_buf);
+
+        const decoded = services.decodeImage(encoded, decode_buf) catch {
+            album.cover = 0;
+            return false;
+        };
+        if (decoded.width == 0 or decoded.height == 0) {
+            album.cover = 0;
+            return false;
+        }
+        if (decoded.width > max_cover_decode_edge or decoded.height > max_cover_decode_edge) {
+            album.cover = 0;
+            return false;
+        }
+
+        const fitted = fitCoverSize(decoded.width, decoded.height);
+        var scaled_storage: [max_cover_register_edge * max_cover_register_edge * 4]u8 = undefined;
+        const rgba: []const u8 = if (fitted.w == decoded.width and fitted.h == decoded.height)
+            decoded.rgba8
+        else blk: {
+            const need = fitted.w * fitted.h * 4;
+            downscaleRgba(decoded.rgba8, decoded.width, decoded.height, scaled_storage[0..need], fitted.w, fitted.h);
+            break :blk scaled_storage[0..need];
+        };
+
+        fx.registerImage(album_id, fitted.w, fitted.h, rgba) catch {
+            album.cover = 0;
+            return false;
+        };
+        album.cover = album_id;
+        return true;
+    }
+
+    // Codec-less / unbound hosts: only images that already fit the SDK
+    // registerImageBytes scratch can succeed.
+    _ = fx.registerImageBytes(album_id, encoded) catch {
         album.cover = 0;
         return false;
     };
     album.cover = album_id;
     return true;
+}
+
+fn applyCoverBytes(model: *Model, fx: *Effects, album_id: u8, bytes: []const u8) bool {
+    return registerCoverEncoded(model, fx, album_id, bytes);
 }
 
 fn closeHeaderMenus(model: *Model) void {
@@ -2077,11 +2261,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .close_edit_album => model.cancelEditAlbum(),
         .change_cover => |album_id| pickAndSetCover(model, fx, album_id),
+        .dismiss_library_notice => {
+            model.library_notice = .none;
+            model.library_notice_count = 0;
+        },
         .library_done => |result| switch (result.op) {
             .read => switch (result.outcome) {
                 .ok => {
                     if (model.restoreLibrary(result.bytes)) {
-                        if (migrateExternalMedia(model)) persistLibrary(model, fx);
+                        var changed = migrateExternalMedia(model);
+                        if (model.refreshTitlesFromMedia()) changed = true;
+                        if (changed) persistLibrary(model, fx);
                         requestAllCoverLoads(model, fx);
                         requestSessionLoad(model, fx);
                     } else {
@@ -2219,9 +2409,12 @@ fn adoptPlatformDuration(model: *Model, fx: *Effects, reported_ms: u64) void {
 /// The play gesture on a specific track (double click, Enter, context
 /// paths): a different track starts fresh, the loaded one toggles
 /// play/pause in place. Either way the track becomes the selection —
-/// the playing row is the current row.
+/// the playing row is the current row — and is appended to the playlist
+/// when it is not already there (same append rule as Play Next, without
+/// forcing the panel open).
 fn playOrToggle(model: *Model, fx: *Effects, track_id: u8) void {
     model.selected = track_id;
+    model.pushQueue(track_id);
     if (model.now == track_id) {
         setPlaying(model, fx, !model.playing);
     } else {
