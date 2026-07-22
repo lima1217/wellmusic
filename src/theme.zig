@@ -32,10 +32,9 @@ const pink_ink = Color.rgb8(255, 255, 255);
 const cover_outline_light = Color.rgba8(0, 0, 0, 26);
 const cover_outline_dark = Color.rgba8(255, 255, 255, 26);
 
-/// Quiet control hairline — softer than Geist's stock 8%/14% so search
-/// fields, menus, and any remaining dividers don't read as a cage of
-/// fine wires. Band separation comes from page↔chrome fill lift, not
-/// from drawn rules.
+/// Quiet control hairline — softer than Geist's stock 8%/14% so menus
+/// and any remaining dividers don't read as a cage of fine wires. Band
+/// separation comes from page↔chrome fill lift, not from drawn rules.
 const hairline_light = Color.rgba8(0, 0, 0, 12); // ~5%
 const hairline_dark = Color.rgba8(255, 255, 255, 18); // ~7%
 
@@ -97,7 +96,7 @@ const ui_spring_damping: f32 = 28.3;
 ///
 /// - `colors.accent`/`accent_text`: the filled-primary pair — the
 ///   selected track row's inverted fill, the header switcher's active
-///   segment, "Playing" badges, the loaded row's title ink, and every
+///   segment, the loaded row's title ink, and every
 ///   control fill that derives from the accent channel (checkbox,
 ///   switch, progress).
 /// - `colors.focus_ring`: the pack spends its identity hue on focus;
@@ -111,7 +110,7 @@ const ui_spring_damping: f32 = 28.3;
 ///   land the identical ring.
 /// - `controls.slider.active_background`: the pack's slider table states
 ///   its own hue for the filled range rather than deriving from the
-///   accent channel, so the seek scrubber needs the same move stated
+///   accent channel, so the volume slider needs the same move stated
 ///   once more or it would keep the pack's stock hue.
 /// - `controls.slider.border`: soft pure-ink outline (never Geist dark's
 ///   solid black thumb wire).

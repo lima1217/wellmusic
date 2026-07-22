@@ -1,18 +1,16 @@
 //! wellmusic: a native music library — add local audio files, browse
-//! and search them, play through the runtime audio effect family, and
+//! them, play through the runtime audio effect family, and
 //! remove tracks you no longer want. There is no built-in sample catalog.
 //!
-//! Authoring split (markup-first, two shells): the header and
+//! Authoring split (markup-first): the header and
 //! now-playing bars are `.native` views compiled at comptime; the album
 //! grid, album detail, and track rows are Zig views because they need
 //! what the closed markup grammar deliberately excludes — square cover
 //! images, grid column counts, scaled paragraph headings, and per-row
 //! native context menus. `src/view.zig` composes both kinds under one
-//! root — the DESKTOP shell — and recomposes the same shared content
-//! pieces into a COMPACT shell for phone-class surfaces.
+//! root — the desktop shell.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 
@@ -68,21 +66,6 @@ pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 // -------------------------------------------------------------- app icons
 
-/// The app's own vector icon, parsed at comptime from the common
-/// stroke-icon dialect (24x24, stroke-width 2, currentColor). Lives
-/// under src/ so `@embedFile` reaches it from the module root (and the
-/// contract's source hash covers icon changes-adjacent code).
-const waveform_icon = canvas.svg_icon.parseComptime(@embedFile("icons/waveform.svg"));
-
-/// The album-grid glyph for the declared mobile tab bar (a 2x2 tile
-/// grid): tab icons come from the registered app-icon vocabulary, so
-/// the projected native bar tints the app's own artwork.
-const albums_icon = canvas.svg_icon.parseComptime(@embedFile("icons/albums.svg"));
-
-/// Single-track loop glyph for the transport play-mode cycle (the SDK
-/// ships plain `repeat` / `shuffle`; the "1" badge is app-owned).
-const repeat_1_icon = canvas.svg_icon.parseComptime(@embedFile("icons/repeat-1.svg"));
-
 /// Sequential (play-through once) glyph: a list with a forward arrow,
 /// distinct from the looping `repeat` mark.
 const sequential_icon = canvas.svg_icon.parseComptime(@embedFile("icons/sequential.svg"));
@@ -97,9 +80,6 @@ const queue_icon = canvas.svg_icon.parseComptime(@embedFile("icons/queue.svg"));
 /// reflects this decl), so markup `app:<name>` references are verified
 /// by `native check` against exactly what the app registers.
 pub const app_icons = [_]canvas.icons.Entry{
-    .{ .name = "waveform", .icon = &waveform_icon },
-    .{ .name = "albums", .icon = &albums_icon },
-    .{ .name = "repeat-1", .icon = &repeat_1_icon },
     .{ .name = "sequential", .icon = &sequential_icon },
     .{ .name = "queue", .icon = &queue_icon },
 };
@@ -168,7 +148,6 @@ pub fn wellMusicOptions() WellMusicApp.Options {
         .on_key = onKey,
         .on_frame = onFrame,
         .animations = animations,
-        .sync = sync,
         .status_item = .{
             .title = "♪",
             .tooltip = "WellMusic",
@@ -212,8 +191,8 @@ fn statusItem(model: *const Model, scratch: *WellMusicApp.StatusItemScratch) Wel
 /// (a tabbed-to row selects on Space and plays on Enter, a slider takes
 /// the arrows), and a focused editable field keeps typing — the
 /// text-entry exception is structural (checked by widget kind in the
-/// runtime), so the header's search field blocks all of these without
-/// this function knowing it exists. A QUIETLY focused track row (the
+/// runtime), so a focused editable field blocks all of these without
+/// this function knowing it exists. A QUIETLY focused track row (the)
 /// state a click leaves behind) is transparent to keys by the
 /// framework's quiet-list-row rule, so after clicking around the
 /// library these still work app-wide:
@@ -267,10 +246,9 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 }
 
 /// The per-frame hook carries the album grid's width channel only.
-/// Playback clock advances come from the ~20 Hz `scrubber_tick` timer
-/// in the model (not display-rate presents), so an idle or paused app
-/// presents zero frames and a playing app stays near 20 Hz instead of
-/// locking the Metal surface to the panel refresh.
+/// There is no seek scrubber and no playback timer, so idle / paused /
+/// playing apps present only on real UI changes (and short track-enter
+/// animations) instead of locking the Metal surface to a clock.
 ///
 /// A WIDTH CHANGE (live resize, fullscreen) dispatches into the model
 /// so the grid re-derives its column count on the very next rebuild.
@@ -301,33 +279,31 @@ pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     return null;
 }
 
-/// The runtime owns transient slider state (`.change` carries no value);
-/// mirror the seek and volume sliders' reconciled values into the model
-/// before each update so the Msg arms read what the user dragged to.
-fn sync(model: *Model, layout: canvas.WidgetLayoutTree) void {
-    for (layout.nodes) |node| {
-        if (node.widget.kind != .slider) continue;
-        if (std.mem.eql(u8, node.widget.semantics.label, "Seek")) {
-            model.seek_fraction = node.widget.value;
-        } else if (std.mem.eql(u8, node.widget.semantics.label, "Volume")) {
-            model.volume = node.widget.value;
-        }
-    }
-}
-
 // ------------------------------------------------------------- animations
 
 /// Track-change enter: title and cover fade/slide in on a critically
 /// damped spring (theme motion), gated on the PLAYBACK clock
-/// (`elapsed_ms` restarts per track). Split + stagger — title leads,
-/// cover follows ~80 ms later — so chunks move independently instead of
-/// one container. Translate is small (8pt): enough to telegraph arrival
-/// without a theatrical drop. Window matches the theme's slow settle
-/// (~340 ms) plus stagger headroom. Reduce-motion zeroes durations
+/// (`elapsed_ms` restarts per track) AND on `playing`. Split + stagger —
+/// title leads, cover follows ~80 ms later — so chunks move independently
+/// instead of one container. Translate is small (8pt): enough to telegraph
+/// arrival without a theatrical drop. Window matches the theme's slow
+/// settle (~340 ms) plus stagger headroom. Reduce-motion zeroes durations
 /// through the theme; the same Msg sequence replays the same set.
+///
+/// `playing` is required: UiApp re-bases `start_ns` to the latest frame
+/// timestamp on every rebuild. A paused (or session-restored) track with
+/// `elapsed_ms` still inside the window would otherwise re-arm the Metal
+/// frame channel forever — audio position ticks keep rebuilding, the
+/// spring never expires, and CPU pegs while edit/cover UI starves.
 const motion_window_ms: u32 = 420;
 /// Stagger between title and cover enter animations (nanoseconds).
 const cover_stagger_ns: u64 = 80_000_000;
+
+/// Whether the now-playing enter motion should still be declared. Pure
+/// so tests can pin the pause/session-restore latch without a full tree.
+pub fn trackEnterMotionActive(playing: bool, elapsed_ms: u32) bool {
+    return playing and elapsed_ms <= motion_window_ms;
+}
 
 pub fn animations(model: *const Model, tree: *const WellMusicApp.Ui.Tree, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize {
     // Keep Control Center / Now Playing in sync with the model. Cheap
@@ -342,7 +318,7 @@ pub fn animations(model: *const Model, tree: *const WellMusicApp.Ui.Tree, start_
         media_session.clear();
     }
     if (model.now == null) return 0;
-    if (model.elapsed_ms > motion_window_ms) return 0;
+    if (!trackEnterMotionActive(model.playing, model.elapsed_ms)) return 0;
     const motion = tokensFromModel(model).motion;
 
     var count: usize = 0;
@@ -385,131 +361,8 @@ fn findByLabel(widget: canvas.Widget, label: []const u8) ?canvas.Widget {
     return null;
 }
 
-// ----------------------------------------------------------------- mobile
-
-/// Mobile embed seam: the same Model/Msg/update/view compiled into the
-/// embed static library (`zig build lib`, which `native dev --target
-/// ios` drives) with the canonical single-surface mobile scene. The
-/// desktop window constants above — size, min size, the tall titlebar —
-/// belong to the DESKTOP scene only: the mobile scene is the full-screen
-/// surface the host owns, so nothing here constrains the phone. The
-/// model seeds its pre-first-frame canvas width at a phone-portrait
-/// value so the installing frame already composes the compact shell; the
-/// first presented frame corrects it, exactly like the desktop seed.
-pub fn initModel() Model {
-    // The mobile host has no main(): the icon table installs here, once,
-    // before any view builds (registration is idempotent — one static
-    // table — so the test harness's own install never conflicts).
-    registerIcons();
-    prepareUiFonts();
-    var model: Model = .{ .canvas_width = model_mod.compact_seed_canvas_width };
-    // Streaming configuration, resolved once at boot exactly like the
-    // desktop main() below — replay's deterministic-init contract holds
-    // on phones too: no env read ever happens inside update. Without
-    // this, every `fx.playAudio` would carry an empty cache_path and a
-    // streamed track would re-download on every single play; with it,
-    // the platform cache-fill installs the verified bytes under the
-    // resolved directory's audio/ child and the next play is local.
-    if (embedEnvValue("NATIVE_SDK_MUSIC_URL_BASE")) |base| model.setUrlBase(base);
-    var cache_dir_buffer: [model_mod.max_cache_dir]u8 = undefined;
-    const cache_dir = native_sdk.app_dirs.resolveOne(
-        .{ .name = "wellmusic" },
-        native_sdk.app_dirs.currentPlatform(),
-        embedEnv(),
-        .cache,
-        &cache_dir_buffer,
-    ) catch "";
-    model.setCacheDir(cache_dir);
-    return model;
-}
-
-/// The embed entry's environment for directory resolution: there is no
-/// `std.process.Init` on this path (the host library calls `initModel()`
-/// directly), so instead of `native_sdk.debug.envFromMap` over an owned
-/// env map the values come from the process environment through libc.
-/// Both phone platforms publish the app's directory namespace there
-/// before any app code runs — iOS processes get HOME (the sandbox
-/// container root) and TMPDIR from the OS itself, and the toolkit's
-/// Android host exports HOME (the app data directory) and TMPDIR (its
-/// cache/ child) in its activity's onCreate — and HOME/TMPDIR are the
-/// only keys the phone resolvers read, so the desktop-only keys stay
-/// null. A build that cannot reach `getenv` (see `embed_env_readable`)
-/// has no environment to read: resolution fails honestly and the cache
-/// stays disabled ("" — streaming still plays, each play just
-/// re-downloads).
-fn embedEnv() native_sdk.app_dirs.Env {
-    return .{
-        .home = embedEnvValue("HOME"),
-        .tmpdir = embedEnvValue("TMPDIR"),
-    };
-}
-
-/// Whether this compilation can emit a `getenv` call at all. The embed
-/// static library declares no libc of its own (the Android slice
-/// cross-compiles pure-Zig, without an NDK sysroot, so `std.c` symbols
-/// are refused at compile time and `link_libc` is false) — but on the
-/// phone targets the enclosing host process always links the system C
-/// runtime (iOS apps link it unconditionally; the Android static lib
-/// lands inside the host .so, which links bionic), so a plain extern
-/// reference below resolves at the host link and the read is safe.
-/// Everywhere else the call is emitted only when libc is actually
-/// linked, so a libc-less desktop test build still links.
-const embed_env_readable = builtin.link_libc or
-    builtin.os.tag == .ios or
-    (@hasField(@TypeOf(builtin.abi), "android") and builtin.abi == .android);
-
-/// libc's environment lookup, declared as a bare external symbol (not
-/// through `std.c`, whose declarations demand a declared libc
-/// dependency): the symbol stays unreferenced unless
-/// `embed_env_readable` holds, and where it holds the final link always
-/// carries the C runtime that defines it.
-extern fn getenv(name: [*:0]const u8) ?[*:0]u8;
-
-/// One env read on the embed path (gated, see `embed_env_readable`). A
-/// set but empty value comes back as "" — exactly what an env map's
-/// `get` reports — so set-empty semantics (an empty URL base disables
-/// streaming) match the desktop launch path.
-fn embedEnvValue(name: [*:0]const u8) ?[]const u8 {
-    if (comptime !embed_env_readable) return null;
-    const value = getenv(name) orelse return null;
-    return std.mem.span(value);
-}
-
-/// Declared platform chrome for the mobile scene: the Albums/Songs
-/// navigation as a REAL system tab bar (the canonical music-app shape).
-/// The ids are command ids — a projected tap dispatches them through
-/// `onCommand` into the same `show_albums`/`show_songs` Msgs the
-/// in-canvas switcher sends, and `selectedTab` mirrors `model.tab` back
-/// so the bar always projects the model. No primary floating action on
-/// purpose: the transport lives in the mini player bar, and a floating
-/// play control would project playback twice.
-const mobile_tab_albums_command = "tabs.albums";
-const mobile_tab_songs_command = "tabs.songs";
-
-/// The platform back command: a completed edge-swipe-back on the album
-/// detail dispatches this id, which maps onto the exact `close_album`
-/// Msg the in-canvas back button sends — the gesture and the button are
-/// indistinguishable in the journal. A cancelled swipe dispatches
-/// nothing.
-const mobile_nav_back_command = "nav.back";
-
-const mobile_chrome_tabs = [_]native_sdk.ShellTab{
-    .{ .id = mobile_tab_albums_command, .label = "Albums", .icon = "app:albums" },
-    .{ .id = mobile_tab_songs_command, .label = "Songs", .icon = "music" },
-};
-
-/// The canonical single-surface mobile scene plus the declared chrome.
-const mobile_scene: native_sdk.ShellConfig = .{
-    .windows = native_sdk.embed.mobile_shell_scene.windows,
-    .chrome = .{ .tabs = &mobile_chrome_tabs },
-};
-
-/// Projected chrome taps and the menu-bar status item arrive as command
-/// events; they map onto the same Msgs the canvas controls dispatch.
+/// Menu-bar status-item commands arrive as transport events.
 pub fn onCommand(name: []const u8) ?Msg {
-    if (std.mem.eql(u8, name, mobile_tab_albums_command)) return .show_albums;
-    if (std.mem.eql(u8, name, mobile_tab_songs_command)) return .show_songs;
-    if (std.mem.eql(u8, name, mobile_nav_back_command)) return .close_album;
     if (std.mem.eql(u8, name, "transport.toggle")) return .{ .media_command = .toggle_play };
     if (std.mem.eql(u8, name, "transport.next")) return .{ .media_command = .next };
     if (std.mem.eql(u8, name, "transport.previous")) return .{ .media_command = .previous };
@@ -517,74 +370,12 @@ pub fn onCommand(name: []const u8) ?Msg {
     return null;
 }
 
-/// The model's selected tab as its declared command id — the projection
-/// the native bar mirrors (an open album detail is still the Albums
-/// tab, exactly like the in-canvas switcher's selected state).
-pub fn selectedTab(model: *const Model) []const u8 {
-    return switch (model.tab) {
-        .albums => mobile_tab_albums_command,
-        .songs => mobile_tab_songs_command,
-    };
-}
-
-/// The model's navigation depth — the projection a host presents REAL
-/// push/pop transitions from (album grid -> album detail pushes; back
-/// pops). Depth follows the VISIBLE page stack, so an open album counts
-/// only while the Albums tab shows it: switching to Songs with a detail
-/// open is a lateral tab change (the host reconciles with no
-/// transition), exactly like switching back. Presentation only — the
-/// state is `model.open_album`, owned by update.
-pub fn navigationDepth(model: *const Model) usize {
-    return if (model.tab == .albums and model.open_album != null) 1 else 0;
-}
-
-pub fn mobileOptions() WellMusicApp.Options {
-    return .{
-        .name = "wellmusic",
-        .scene = mobile_scene,
-        .canvas_label = native_sdk.embed.mobile_gpu_surface_label,
-        .update_fx = update,
-        .view = rootView,
-        .init_fx = boot,
-        .tokens_fn = tokensFromModel,
-        .fonts = ui_font_regs[0..ui_font_reg_count],
-        .on_appearance = onAppearance,
-        .on_chrome = onChrome,
-        .on_command = onCommand,
-        .selected_tab_fn = selectedTab,
-        .navigation_depth_fn = navigationDepth,
-        .navigation_back_command = mobile_nav_back_command,
-        .on_key = onKey,
-        .on_frame = onFrame,
-        .animations = animations,
-        .sync = sync,
-    };
-}
-
 // ------------------------------------------------------------------- main
 
 pub fn main(init: std.process.Init) !void {
     registerIcons();
     prepareUiFonts();
-    // Streaming configuration, resolved once at launch: the env URL
-    // base overrides the manifest's committed one (so a locally served
-    // pack needs no re-prepare), and the platform caches directory
-    // (~/Library/Caches/wellmusic on macOS, XDG cache on Linux) hosts
-    // the track cache in its audio/ child — delete that directory to
-    // clear the cache. Both land in the INITIAL model, so replay's
-    // deterministic-init contract holds: no env read ever happens
-    // inside update.
     var model: Model = .{};
-    if (init.environ_map.get("NATIVE_SDK_MUSIC_URL_BASE")) |base| model.setUrlBase(base);
-    var cache_dir_buffer: [model_mod.max_cache_dir]u8 = undefined;
-    const cache_dir = native_sdk.app_dirs.resolveOne(
-        .{ .name = "wellmusic" },
-        native_sdk.app_dirs.currentPlatform(),
-        native_sdk.debug.envFromMap(init.environ_map),
-        .cache,
-        &cache_dir_buffer,
-    ) catch "";
-    model.setCacheDir(cache_dir);
     var data_dir_buffer: [model_mod.max_store_path]u8 = undefined;
     var store_file_buffer: [model_mod.max_store_path]u8 = undefined;
     const data_dir = native_sdk.app_dirs.resolveOne(

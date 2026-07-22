@@ -9,9 +9,8 @@
 //! at launch and hand the bytes to `Options.fonts`. The app package stays
 //! small; only the process RSS grows by the face size.
 //!
-//! Candidate paths are macOS-only. iOS / Android targets need their own
-//! paths or a bundled face — `initModel`'s mobile path currently fails
-//! the load quietly and falls back to tofu.
+//! Candidate paths are macOS-only. Other targets need their own paths
+//! or a bundled face.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");

@@ -49,8 +49,8 @@ var cf_keys: ?CfKeys = null;
 
 /// Platform-bridge publish cache — not Model state, not part of replay.
 /// Remembers the last published content fingerprint (title/artist hashes,
-/// duration, playing, elapsed seconds) so ~20 Hz scrubber rebuilds skip
-/// identical `setNowPlayingInfo:` work. Hashes (not ptr+len) so in-place
+/// duration, playing, elapsed seconds) so coarse position-tick rebuilds
+/// skip identical `setNowPlayingInfo:` work. Hashes (not ptr+len) so in-place
 /// edits of the same storage still republish.
 const PublishCache = struct {
     title_hash: u64 = 0,

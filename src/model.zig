@@ -1,4 +1,4 @@
-//! wellmusic model: a user-owned music library with playback, search,
+//! wellmusic model: a user-owned music library with playback,
 //! navigation, and theming state the views bind to.
 //!
 //! There is no built-in sample catalog. Tracks enter through the native
@@ -15,7 +15,6 @@
 //!   - `max_user_albums` user albums (Library + folder imports)
 //!   - `max_user_tracks` imported tracks across all albums
 //!   - playlist sized to `max_user_tracks` (full album / play-next list)
-//!   - 48-byte search buffer
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -46,14 +45,8 @@ pub const Track = struct {
     /// Per-track artist; empty falls back to the album artist in the UI.
     artist: []const u8,
     path: []const u8,
-    file: []const u8,
     duration_ms: u32,
-    bytes: u64,
 };
-
-/// No committed sample albums or tracks — the library is user-owned.
-pub const albums = [_]Album{};
-pub const tracks = [_]Track{};
 
 /// Album id 1 is the catch-all for loose file imports (`add_music`).
 pub const imported_album_id: u8 = 1;
@@ -85,11 +78,6 @@ pub fn coverReadKey(album_id: u8) u64 {
 pub fn albumIdFromCoverKey(key: u64) ?u8 {
     if (key < cover_read_key_base or key > cover_read_key_base + 255) return null;
     return @intCast(key - cover_read_key_base);
-}
-
-pub fn trackById(id: u8) *const Track {
-    _ = id;
-    @panic("wellmusic has no built-in tracks; use Model.resolveTrack");
 }
 
 pub fn isUserTrackId(id: u8) bool {
@@ -152,10 +140,6 @@ pub const UserAlbum = struct {
         album.refreshInitials();
     }
 
-    pub fn setYear(album: *UserAlbum, value: u16) void {
-        album.year = value;
-    }
-
     pub fn setCoverPath(album: *UserAlbum, value: []const u8) void {
         const len = @min(value.len, max_user_path);
         @memcpy(album.cover_path_storage[0..len], value[0..len]);
@@ -212,9 +196,7 @@ pub const UserTrack = struct {
             .title = track.title(),
             .artist = track.artist(),
             .path = track.path(),
-            .file = "",
             .duration_ms = track.duration_ms,
-            .bytes = 0,
         };
     }
 
@@ -242,13 +224,11 @@ pub const UserTrack = struct {
 /// Playlist capacity: large enough for every imported track so Play Album
 /// can show the whole record. Play Next appends into the same list.
 pub const max_queue = max_user_tracks;
-pub const max_search = 48;
 /// The header bar's natural height, and the floor `header_height` falls
 /// back to when no titlebar band overlays the content (fullscreen,
 /// standard chrome, tests). Matches the tall hidden-inset band the
-/// system reports through `on_chrome` — the band must not be taller
-/// than the OS band, or the header's controls center below the traffic
-/// lights the system centers within its own band.
+/// system reports through `on_chrome` — keep the header no taller than
+/// that band so `cross="center"` lands controls on the midline.
 pub const header_natural_height: f32 = 52;
 /// The window's content min-width floor (main.zig declares it on the
 /// shell window) and the default `canvas_width` before the first
@@ -259,57 +239,15 @@ pub const header_natural_height: f32 = 52;
 /// underfill a wider surface for one frame, never overflow a narrow one.
 pub const min_canvas_width: f32 = 1056;
 
-/// The pre-first-frame `canvas_width` the MOBILE entry seeds instead
-/// (main.zig's `initModel`): a mainstream phone-portrait width, so the
-/// installing frame on a phone already composes the compact shell — the
-/// full-screen mobile host has no window min-width to seed from, and
-/// seeding the desktop floor would flash a desktop tree onto a 390pt
-/// surface for one frame. The first presented frame corrects the value
-/// exactly like the desktop seed; only the boot frame reads it.
-pub const compact_seed_canvas_width: f32 = 390;
-
-/// Which shell the root view composes. The two shells share every
-/// content piece (tiles, rows, headings, the now-playing bindings) and
-/// differ only in composition: `regular` is the desktop shape (wide
-/// header bar, adaptive multi-column grid, full transport rail),
-/// `compact` the phone shape (stacked touch header, mini player,
-/// safe-area padding).
-pub const FormFactor = enum { compact, regular };
-
 /// Effect keys, model-owned identity (effect-key style). Audio playback
 /// keys are the track ids themselves — one key namespace per channel.
-pub const copy_key: u64 = 2;
 // library_read_key / library_write_key live with the user-library caps.
 
 /// The honest degraded state when a track's file cannot load.
 pub const assets_missing_title = "couldn’t play this file";
 pub const assets_missing_hint = "check the path or re-add the track";
 
-/// The honest degraded state when a STREAM fails (a URL base is
-/// configured, the local file was absent, and the network let the
-/// playback down — offline with a cold cache, a dead host, a mid-flight
-/// drop). Distinct from the assets notice on purpose: the remedy is
-/// different.
-pub const stream_failed_title = "stream unavailable";
-pub const stream_failed_hint = "check the connection and try again";
-
-/// The artist line while a stream is stalled waiting for bytes — the
-/// honest state between "playing" and "paused" that only URL sources
-/// have.
-pub const buffering_hint = "buffering…";
-
-/// Streaming configuration bounds: optional URL base override via
-/// NATIVE_SDK_MUSIC_URL_BASE (unused for local imports) and the
-/// platform cache directory resolved in main.
-pub const max_url_base = 256;
-pub const max_cache_dir = 512;
-
-/// No committed streaming catalog — local files only by default.
-pub const manifest_url_base: []const u8 = "";
-
 // ------------------------------------------------------------------- model
-
-pub const Tab = enum { albums, songs };
 
 /// How the transport picks the next track when one finishes (or the
 /// user skips). When the current track is in the playlist, modes walk
@@ -318,10 +256,6 @@ pub const Tab = enum { albums, songs };
 pub const PlayMode = enum {
     /// Wrap within the playlist (or album when the playlist is empty).
     list_loop,
-    /// Restart the same track when it completes; skip still advances.
-    single_loop,
-    /// Pick another track in the playlist (or album) at random.
-    shuffle,
     /// Play the playlist (or album) once and stop on the last track.
     sequential,
 };
@@ -344,11 +278,10 @@ pub const ThemePreference = enum {
     }
 };
 
-/// One presented frame's clock. Historically delivered through `on_frame`
-/// at display rate while playing; the live path now drives the same
-/// advance from a ~20 Hz fx timer (`scrubber_tick`) so playback does not
-/// keep a full Metal present loop warm. Tests and journals may still
-/// send `frame_clock` directly.
+/// One presented frame's clock. Historically used to interpolate the
+/// rendered playback clock between coarse player position ticks. The
+/// live app has no seek scrubber, so this path is journal/test-only;
+/// elapsed time comes from audio position events.
 pub const FrameClock = struct {
     timestamp_ns: u64,
     interval_ns: u64,
@@ -361,21 +294,24 @@ pub const FrameClock = struct {
 /// buffering flag has not reported yet), and honesty beats smoothness.
 const position_snap_slack_ms: u32 = 600;
 
-/// Scrubber / now-playing clock while audio moves. 50 ms ≈ 20 Hz: smooth
-/// enough for the seek bar, far cheaper than tying the canvas to the
-/// display refresh for the whole track.
-pub const scrubber_timer_key: u64 = 42;
-pub const scrubber_interval_ms: u64 = 50;
+/// Playback-state poll while playing. The platform emits `.spectrum`
+/// band reports at ~25 Hz whenever audio plays; each report would become
+/// an `audio_event` Msg and force a full TEA rebuild even though
+/// WellMusic draws no analyzer. So `playAudio` intentionally omits
+/// `on_event`, and this timer (~2 Hz) mirrors position / completion /
+/// failure from `fx.audioSnapshot()` instead.
+pub const audio_poll_timer_key: u64 = 43;
+pub const audio_poll_interval_ms: u64 = 500;
 
 pub const Msg = union(enum) {
-    show_albums,
-    show_songs,
-    /// Header / compact: cycle Albums ↔ Songs with one control.
-    toggle_library_view,
-    /// Header / compact: cycle the app theme light ↔ dark (locks off
+    /// Header: cycle the app theme light ↔ dark (locks off
     /// system-follow on first press).
     toggle_theme,
-    /// Header / compact / empty state: open or close the Add menu.
+    /// Header overflow (⋯): open or close the actions menu.
+    toggle_header_menu,
+    /// Header overflow: Escape / click-outside dismisses without acting.
+    close_header_menu,
+    /// Empty-state Add control: open or close the Add Song / Add Album menu.
     toggle_add_menu,
     /// Add dropdown: Escape / click-outside dismisses without importing.
     close_add_menu,
@@ -393,7 +329,6 @@ pub const Msg = union(enum) {
     /// flow-wrap, so adapting to the window is the model's job: track
     /// the width, chunk in the view.
     canvas_resized: f32,
-    search_edit: canvas.TextInputEvent,
     open_album: u8,
     close_album,
     play_album: u8,
@@ -409,24 +344,23 @@ pub const Msg = union(enum) {
     /// Enter through the app-level key fallback: play the selected
     /// track (toggling pause when it is already the loaded one).
     play_selected,
-    /// One presented frame while playing: advances the rendered playback
-    /// clock so the scrubber moves between coarse position ticks. Kept
-    /// for tests/journals; the live app prefers `scrubber_tick`.
+    /// One presented frame: advances the rendered playback clock between
+    /// coarse position ticks. Journal/test path only — the live app has
+    /// no seek scrubber and does not arm a playback timer.
     frame_clock: FrameClock,
-    /// ~20 Hz fx timer while playing: same clock advance as `frame_clock`,
-    /// without sustaining a display-rate Metal present loop.
-    scrubber_tick: native_sdk.EffectTimer,
+    /// ~2 Hz mirror of `fx.audioSnapshot()` while a track is loaded.
+    /// Replaces platform `on_event` delivery so ~25 Hz spectrum reports
+    /// never enter the TEA loop (see `audio_poll_timer_key`).
+    audio_poll: native_sdk.EffectTimer,
     toggle_play,
     next_track,
     prev_track,
-    /// Cycle the transport play mode: list loop → single → shuffle →
-    /// sequential → list loop.
+    /// Cycle the transport play mode: list loop ↔ sequential.
     cycle_play_mode,
-    /// Seek slider changed; the reconciled value arrives through the
-    /// `sync` hook (`seek_fraction`) before this message is applied.
-    seeked,
-    /// Volume slider changed; mirrored through `sync` (`volume`).
-    volume_changed,
+    /// Volume slider changed; the applied fraction rides the Msg so a
+    /// rebuild-time `sync` cannot clobber a just-restored volume with
+    /// the previous frame's slider thumb (default 1.0 on first launch).
+    volume_changed: f32,
     /// Toggle the playlist panel above the transport.
     toggle_queue,
     /// Remove one entry from the playlist by track id.
@@ -436,21 +370,16 @@ pub const Msg = union(enum) {
     /// Drain a macOS remote-command / media-key binding into transport.
     media_command: enum { toggle_play, next, previous },
     /// Every audio playback report: the load acknowledgment, position
-    /// ticks, the one completion, and failures. Plain data — safe to
-    /// read whole in update.
+    /// ticks, the one completion, and failures. Tests and journals send
+    /// these directly; the live player does not — see `audio_poll`.
     audio_event: native_sdk.EffectAudio,
     /// Controlled scroll: each region's applied offset lands here and the
     /// view echoes it back, so a rebuild mid-gesture can never reset it.
     grid_scrolled: canvas.ScrollState,
     detail_scrolled: canvas.ScrollState,
-    songs_scrolled: canvas.ScrollState,
     /// Context menu: queue a track to play after the current one.
     queue_track: u8,
-    /// Context menu: copy the track title to the clipboard via `pbcopy`
-    /// (the effects channel has no clipboard call today).
-    copy_title: u8,
-    copied: native_sdk.EffectExit,
-    /// Header / compact: open a native multi-select file dialog and
+    /// Header: open a native multi-select file dialog and
     /// import the chosen audio files into the Library album.
     add_music,
     /// Header / empty state: pick a folder and import it as a new album.
@@ -464,12 +393,11 @@ pub const Msg = union(enum) {
     /// Edit dialog text fields (shared by song and album dialogs).
     edit_title: canvas.TextInputEvent,
     edit_artist: canvas.TextInputEvent,
-    edit_year: canvas.TextInputEvent,
     /// Edit dialog: commit title/artist and close.
     save_edit_track,
     /// Edit dialog: dismiss without saving.
     close_edit_track,
-    /// Edit album dialog: commit title/artist/year and close.
+    /// Edit album dialog: commit title/artist and close.
     save_edit_album,
     /// Edit album dialog: dismiss without saving.
     close_edit_album,
@@ -489,18 +417,14 @@ pub const Msg = union(enum) {
     /// dead-state lint must not ask for one.
     pub const view_unbound = .{
         "set_appearance", "chrome_changed", "canvas_resized",
-        // Mobile native tab bar (and tests) still send these; the in-canvas
-        // header now uses `toggle_library_view` instead.
-        "show_albums",    "show_songs",
         "open_album",     "close_album",    "play_album",
         "play_track",     "select_track",   "select_next",
         "select_previous", "play_selected", "frame_clock",
-        "scrubber_tick",
+        "audio_poll",
         "audio_event",    "grid_scrolled",  "detail_scrolled",
-        "songs_scrolled", "queue_track",    "copy_title",
-        "copied",         "remove_track",   "edit_track",
+        "queue_track",    "remove_track",   "edit_track",
         "edit_album",     "edit_title",     "edit_artist",
-        "edit_year",      "save_edit_track", "close_edit_track",
+        "save_edit_track", "close_edit_track",
         "save_edit_album", "close_edit_album", "change_cover",
         "library_done",   "cover_done",     "volume_changed",
         "toggle_queue",   "remove_queued",  "clear_queue",
@@ -511,13 +435,12 @@ pub const Msg = union(enum) {
 
 pub const Model = struct {
     // Source-of-truth state only; everything else is derived per rebuild.
-    tab: Tab = .albums,
     appearance: native_sdk.Appearance = .{},
     /// Light/dark preference for tokens. Defaults to system-follow so a
     /// fresh install matches the OS; `toggle_theme` locks light or dark.
     theme: ThemePreference = .system,
     open_album: ?u8 = null,
-    /// Controlled scroll offsets (album grid, album detail, all songs):
+    /// Controlled scroll offsets (album grid and album detail):
     /// the model observes the applied offset and echoes it back.
     grid_scroll: f32 = 0,
     detail_scroll: f32 = 0,
@@ -530,44 +453,17 @@ pub const Model = struct {
     /// The trailing twin: how far OS window controls overlay the
     /// header's END (Windows delivers the min/max/close cluster here;
     /// macOS reports zero). The header closes with a spacer this wide
-    /// so the search field clears the caption buttons.
+    /// so the trailing controls clear the caption buttons.
     chrome_trailing: f32 = 0,
-    /// The chrome band heights at the surface's TOP and BOTTOM edges,
-    /// stored raw (no header floor applied). On phones the window-chrome
-    /// channel carries the SAFE AREAS — status bar / Dynamic Island
-    /// above, home indicator below — and the compact shell pads exactly
-    /// these so content never sits under either. The desktop shell reads
-    /// the floored `header_height` derivation below instead and has no
-    /// bottom band to clear, so these stay untouched there.
-    chrome_top: f32 = 0,
-    chrome_bottom: f32 = 0,
-    /// The host-reported form factor from the window-chrome channel
-    /// (`chrome_changed`), null until a host reports one. When present
-    /// it OWNS the shell switch (`formFactor` below) and the width
-    /// derivation becomes the fallback for hosts that never report —
-    /// desktop windows, tests, older hosts. Sticky by design: a host
-    /// that reported once keeps its last report (an explicit `.unknown`
-    /// never arrives as a Msg payload worth erasing state over).
-    host_form_factor: ?FormFactor = null,
-    /// True while the host projects the declared chrome tabs as a REAL
-    /// native tab bar (`chrome_changed` carries the flag). The compact
-    /// header yields its in-canvas Albums/Songs switcher while set —
-    /// one tab affordance on screen, the system's — and keeps it
-    /// everywhere the declaration is inert.
-    native_tabs: bool = false,
     header_height: f32 = header_natural_height,
     /// The live canvas width, from `canvas_resized`. Seeds at the window
     /// min-width floor (see `min_canvas_width`) so pre-first-frame trees
     /// fit the narrowest window; the first presented frame corrects it.
     canvas_width: f32 = min_canvas_width,
-    songs_scroll: f32 = 0,
     now: ?u8 = null, // playing track id
-    /// Transport play mode: list loop / single / shuffle / sequential.
+    /// Transport play mode: list loop or sequential.
     /// Default matches the historic wrap-within-album advance.
     play_mode: PlayMode = .list_loop,
-    /// Advances on every shuffle pick so consecutive skips diverge
-    /// without a system CSPRNG (Zig 0.16 random lives behind Io).
-    shuffle_nonce: u64 = 0,
     /// The SELECTED track id — the inverted accent row in track lists.
     /// Distinct from `now` on purpose: single click / arrows move the
     /// selection, only a double click, Enter, or the transport moves
@@ -575,83 +471,46 @@ pub const Model = struct {
     /// current row), but selecting never plays.
     selected: ?u8 = null,
     playing: bool = false,
-    /// The RENDERED playback clock (labels, scrubber, the motion window).
-    /// While playing it advances every presented frame (`frame_clock`,
-    /// bounded per-frame steps) and the player's coarse position ticks
-    /// correct it: forward corrections apply, small backward ones hold
-    /// flat (the bar never visibly rewinds mid-play), and only a
-    /// past-slack disagreement snaps. Paused, buffering, and seeking
-    /// snap exactly — interpolation exists only where there is motion.
+    /// Playback clock for session restore, Now Playing, and the track-
+    /// enter motion window. Advanced by player position ticks (and the
+    /// journal-only `frame_clock` path); there is no live scrubber timer.
     elapsed_ms: u32 = 0,
     /// The last `frame_clock` timestamp, the delta base for the rendered
     /// clock. Never reset: a stale gap (pause, occlusion, boot) is
     /// bounded by the frame-interval clamp in `advanceRenderedClock`.
     frame_ns: u64 = 0,
-    /// The loaded track's TOTAL for display and seek math: the manifest
-    /// duration, the same number the track lists render — the two
-    /// surfaces must agree. The platform's self-reported duration never
-    /// replaces a nonzero manifest value (it is an estimate for this
-    /// catalog — see `handleAudioEvent`); only a track the manifest
-    /// carries no duration for adopts the platform's report, since an
-    /// estimated scrubber beats a dead one.
+    /// The loaded track's TOTAL: the manifest duration when present,
+    /// otherwise the platform's self-reported duration (see
+    /// `handleAudioEvent`). Used for session/media-session metadata —
+    /// not a visible scrubber denominator.
     now_duration_ms: u32 = 0,
     /// The platform player's own duration report, mirrored verbatim
     /// from the audio events: observable state for tests and debugging,
     /// and the fallback total above — never the displayed number while
     /// the manifest has one.
     platform_duration_ms: u32 = 0,
-    /// A track's file failed to load (the gitignored audio assets are
-    /// not prepared, no URL base is configured, or the platform has no
+    /// A track's file failed to load (it was moved, deleted, or the platform has no
     /// audio playback): playback is cleared and the now-playing bar
     /// shows the prepare hint instead.
     assets_missing: bool = false,
-    /// A STREAM failed (a URL base is configured and the network let
-    /// the playback down): playback is cleared and the now-playing bar
-    /// shows the connection hint instead of the prepare hint.
-    stream_failed: bool = false,
-    /// The stream is stalled waiting for network bytes — mirrored from
-    /// the audio events' buffering flag so the bar can show the honest
-    /// third state between playing and paused. Local files never set it.
-    buffering: bool = false,
-    /// Armed when `startTimer` for the scrubber is live. Starting an
-    /// already active fx timer re-arms it (and would starve fires if
-    /// called every update), so transitions only flip this flag. Lives
-    /// on the Model so tests and journal replay stay isolated.
-    scrubber_timer_armed: bool = false,
-    /// Set when the scrubber timer was rejected (table full, no platform
-    /// timer service). Blocks re-arm for the rest of this play session so
-    /// reject → retry cannot loop; cleared when playback no longer wants
-    /// the timer (pause / stop / buffer).
-    scrubber_degraded: bool = false,
-    /// The streaming URL base: the manifest's committed value (the
-    /// hosted catalog mirror, so streaming works out of the box) until
-    /// main overrides it from NATIVE_SDK_MUSIC_URL_BASE. Empty means
-    /// local-only playback (the variable set empty disables streaming).
-    url_base_buffer: [max_url_base]u8 = blk: {
-        var buffer: [max_url_base]u8 = @splat(0);
-        @memcpy(buffer[0..manifest_url_base.len], manifest_url_base);
-        break :blk buffer;
-    },
-    url_base_len: usize = manifest_url_base.len,
-    /// The platform caches directory for this app (app_dirs `.cache`),
-    /// resolved in main; the track cache lives in its audio/ child.
-    /// Empty (tests, resolution failure) disables the cache — streams
-    /// still play, they just never persist.
-    cache_dir_buffer: [max_cache_dir]u8 = @splat(0),
-    cache_dir_len: usize = 0,
+    /// Armed when the audio-poll fx timer is live. Edge-triggered so
+    /// re-arming every update cannot starve fires. Model-owned for
+    /// test / journal isolation.
+    audio_poll_armed: bool = false,
     /// Playlist (Play Album fills it with the whole record; Play Next appends).
     queue: [max_queue]u8 = @splat(0),
     queue_len: usize = 0,
     queue_dropped: u32 = 0,
-    search_buffer: canvas.TextBuffer(max_search) = .{},
-    /// Seek slider value, mirrored from the runtime through `sync`.
-    seek_fraction: f32 = 0,
-    /// Volume slider value (0..1), mirrored through `sync` and applied
+    /// Volume slider value (0..1), set by `volume_changed` and applied
     /// with `fx.setAudioVolume`. Remembered in the session store.
     volume: f32 = 1.0,
     /// Whether the playlist panel is expanded above the transport.
     queue_open: bool = false,
-    /// Header / empty-state Add control: the anchored dropdown is open.
+    /// Header overflow (⋯): the anchored actions menu is open.
+    /// Ephemeral — not persisted; Escape / outside click / an action
+    /// choice clears it.
+    header_menu_open: bool = false,
+    /// Empty-state Add control: the anchored dropdown is open.
     /// Ephemeral — not persisted; Escape / outside click / an import
     /// choice clears it.
     add_menu_open: bool = false,
@@ -662,10 +521,6 @@ pub const Model = struct {
     editing_album: ?u8 = null,
     edit_title_buffer: canvas.TextBuffer(max_user_title) = .{},
     edit_artist_buffer: canvas.TextBuffer(max_user_title) = .{},
-    edit_year_buffer: canvas.TextBuffer(8) = .{},
-    /// Copy-to-clipboard bookkeeping: how many pbcopy spawns finished ok.
-    copies_done: u32 = 0,
-    copy_failed: bool = false,
     /// User albums (Library + folder imports). Cap is loud by design.
     user_albums: [max_user_albums]UserAlbum = undefined,
     user_album_count: usize = 0,
@@ -688,7 +543,8 @@ pub const Model = struct {
     session_write_inflight: bool = false,
     session_save_pending: bool = false,
     /// Set after a session restore asks playback to resume — cleared
-    /// once `startTrack` runs from `library_done`/`session_done`.
+    /// once `applySessionResume` runs. Launch always resumes paused
+    /// (ignores a stored playing=1); the flag still round-trips for tests.
     session_resume_track: ?u8 = null,
     session_resume_elapsed_ms: u32 = 0,
     session_resume_playing: bool = false,
@@ -700,32 +556,25 @@ pub const Model = struct {
     /// logic, or main's launch wiring — never bound in markup — so
     /// opting them out keeps `native check`'s dead-state lint quiet
     /// without weakening it for real drift. The markup fragments bind
-    /// the derived fns (`nowPlayingTitle`, `playPauseIcon`,
-    /// `progressFraction`, ...) instead of these backing stores.
+    /// the derived fns (`nowPlayingTitle`, `playPauseIcon`, ...) instead
+    /// of these backing stores.
     pub const view_unbound = .{
-        "tab",             "open_album",     "grid_scroll",
-        "detail_scroll",   "canvas_width",   "songs_scroll",
+        "open_album",      "grid_scroll",
+        "detail_scroll",   "canvas_width",
         "now",             "selected",       "playing",
-        "play_mode",       "shuffle_nonce",
+        "play_mode",
         "elapsed_ms",      "frame_ns",       "now_duration_ms",
         "platform_duration_ms",
-        "assets_missing",  "stream_failed",  "buffering",
-        "scrubber_timer_armed", "scrubber_degraded",
-        "url_base_len",    "cache_dir_len",  "queue_dropped",
-        "seek_fraction",   "volume",
-        "copies_done",    "copy_failed",
-        "appearance",      "theme",          "search_buffer",  "url_base_buffer",
-        "cache_dir_buffer", "queue",         "queue_len",
+        "assets_missing",
+        "audio_poll_armed",
+        "queue_dropped",
+        "volume",
+        "appearance",      "theme",          "queue",          "queue_len",
         "editing_track",   "editing_album",  "edit_title_buffer",
-        "edit_artist_buffer", "edit_year_buffer",
-        "chrome_top",      "chrome_bottom",  "host_form_factor",
-        "native_tabs",     "urlBase",
-        "cacheDir",        "streamingConfigured", "searching",
-        "colorScheme",     "hasNowPlaying",  "playingAlbum",
-        "visibleAlbums",   "visibleTracks",  "miniBarVisible",
-        "formFactor",
-        "albumsShowing",   "songsShowing", "libraryViewLabel",
-        "albumCount",      "trackCount",
+        "edit_artist_buffer",
+        "colorScheme",     "hasNowPlaying",
+        "visibleAlbums",
+        "albumCount",
         "user_albums",     "user_album_count", "next_user_album_id",
         "user_tracks",     "user_track_count", "next_user_track_id",
         "store_path_buffer", "store_path_len", "store_write_inflight",
@@ -737,80 +586,11 @@ pub const Model = struct {
         "save_pending",    "library_notice", "library_notice_count",
         "storePath",       "sessionPath",    "mediaDir",
         "editTitle",
-        "editArtist",      "editYear",       "isEditingTrack",
+        "editArtist",      "isEditingTrack",
         "isEditingAlbum",  "queuedTracks",   "volumeFraction",
     };
 
     // ------------------------------------------------------------- queries
-
-    pub fn search(model: *const Model) []const u8 {
-        return model.search_buffer.text();
-    }
-
-    pub fn urlBase(model: *const Model) []const u8 {
-        return model.url_base_buffer[0..model.url_base_len];
-    }
-
-    pub fn cacheDir(model: *const Model) []const u8 {
-        return model.cache_dir_buffer[0..model.cache_dir_len];
-    }
-
-    /// Whether tracks can stream on demand: a URL base is configured
-    /// (manifest or env). This is what turns the "assets not prepared"
-    /// story into "streams on demand".
-    pub fn streamingConfigured(model: *const Model) bool {
-        return model.url_base_len > 0;
-    }
-
-    /// Install the streaming base (launch-time: env override or the
-    /// manifest default). A trailing slash is trimmed so URL assembly
-    /// is uniform; an over-long value is refused whole — a truncated
-    /// base would stream garbage politely.
-    pub fn setUrlBase(model: *Model, base: []const u8) void {
-        const trimmed = std.mem.trimEnd(u8, base, "/");
-        if (trimmed.len > max_url_base) return;
-        @memcpy(model.url_base_buffer[0..trimmed.len], trimmed);
-        model.url_base_len = trimmed.len;
-    }
-
-    /// Install the platform cache directory (launch-time). Over-long
-    /// values are refused whole, leaving the cache disabled — honest
-    /// degrade, streams still play.
-    pub fn setCacheDir(model: *Model, dir: []const u8) void {
-        if (dir.len > max_cache_dir) return;
-        @memcpy(model.cache_dir_buffer[0..dir.len], dir);
-        model.cache_dir_len = dir.len;
-    }
-
-    pub fn searching(model: *const Model) bool {
-        return model.search().len > 0;
-    }
-
-    pub fn albumsShowing(model: *const Model) bool {
-        return model.tab == .albums;
-    }
-
-    pub fn songsShowing(model: *const Model) bool {
-        return model.tab == .songs;
-    }
-
-    /// Label for the single library view switcher: the view currently
-    /// on screen. Press cycles to the other via `toggle_library_view`.
-    pub fn libraryViewLabel(model: *const Model) []const u8 {
-        return switch (model.tab) {
-            .albums => "Albums",
-            .songs => "Songs",
-        };
-    }
-
-    /// Icon for the library view switcher — grid when on albums, music
-    /// note when on the flat songs list.
-    pub fn libraryViewIcon(model: *const Model) []const u8 {
-        return switch (model.tab) {
-            .albums => "app:albums",
-            .songs => "music",
-        };
-    }
 
     pub fn colorScheme(model: *const Model) native_sdk.ColorScheme {
         return model.theme.colorScheme(model.appearance.color_scheme);
@@ -822,6 +602,15 @@ pub const Model = struct {
         return switch (model.colorScheme()) {
             .light => "moon",
             .dark => "sun",
+        };
+    }
+
+    /// Menu label for the theme toggle — same destination naming as
+    /// `themeIcon` (pressing switches to this mode).
+    pub fn themeLabel(model: *const Model) []const u8 {
+        return switch (model.colorScheme()) {
+            .light => "Dark mode",
+            .dark => "Light mode",
         };
     }
 
@@ -901,20 +690,12 @@ pub const Model = struct {
         return model.edit_artist_buffer.text();
     }
 
-    pub fn editYear(model: *const Model) []const u8 {
-        return model.edit_year_buffer.text();
-    }
-
     pub fn albumCount(model: *const Model) usize {
         var count: usize = 0;
         for (model.user_albums[0..model.user_album_count]) |*album| {
             if (model.tracksInAlbum(album.id) > 0) count += 1;
         }
         return count;
-    }
-
-    pub fn trackCount(model: *const Model) usize {
-        return model.user_track_count;
     }
 
     pub fn tracksInAlbum(model: *const Model, album_id: u8) usize {
@@ -966,36 +747,6 @@ pub const Model = struct {
         return model.now != null;
     }
 
-    /// The shell rule: the HOST-REPORTED form factor owns the switch
-    /// when a host has reported one (the window-chrome channel carries
-    /// it, so it arrived as a Msg and replays with the journal); the
-    /// width rule below is the fallback for hosts that never report —
-    /// desktop windows, tests, older hosts.
-    ///
-    /// The width fallback, one strict comparison with no hysteresis:
-    /// COMPACT strictly below the desktop shell's proven min content
-    /// width (`min_canvas_width` — the floor the desktop layout audit
-    /// sweeps from), the desktop shell at the floor and above. The
-    /// boundary is honest by construction: every narrower surface is one
-    /// the desktop composition has never been proven clean on (desktop
-    /// windows enforce the floor, so only phone-class surfaces ever
-    /// report less), and exactly AT the floor the audit proves the
-    /// desktop shell clean. Both inputs are per-frame model state, so
-    /// the same Msg sequence always lands the same shell.
-    pub fn formFactor(model: *const Model) FormFactor {
-        if (model.host_form_factor) |host| return host;
-        return if (model.canvas_width < min_canvas_width) .compact else .regular;
-    }
-
-    /// Whether the compact shell's mini player is on screen: a track is
-    /// loaded (playing OR paused — the bar must not vanish on pause), or
-    /// a degraded playback notice needs a surface to read on (a failed
-    /// load clears `now`, and the notice would otherwise be invisible on
-    /// a phone with no persistent transport rail).
-    pub fn miniBarVisible(model: *const Model) bool {
-        return model.now != null or model.assets_missing or model.stream_failed;
-    }
-
     pub fn idle(model: *const Model) bool {
         return model.now == null;
     }
@@ -1008,13 +759,10 @@ pub const Model = struct {
         return if (model.playing) "pause" else "play";
     }
 
-    /// Glyph for the play-mode cycle button: built-in `repeat` /
-    /// `shuffle` plus the app-owned single-loop and sequential marks.
+    /// Glyph for the play-mode cycle button.
     pub fn playModeIcon(model: *const Model) []const u8 {
         return switch (model.play_mode) {
             .list_loop => "repeat",
-            .single_loop => "app:repeat-1",
-            .shuffle => "shuffle",
             .sequential => "app:sequential",
         };
     }
@@ -1035,39 +783,17 @@ pub const Model = struct {
     /// failure, so the user is told what to run instead of hearing
     /// nothing.
     pub fn nowPlayingTitle(model: *const Model) []const u8 {
-        if (model.stream_failed) return stream_failed_title;
         if (model.assets_missing) return assets_missing_title;
         const track = model.nowTrack() orelse return "Nothing playing";
         return track.title;
     }
 
     pub fn nowPlayingArtist(model: *const Model) []const u8 {
-        if (model.stream_failed) return stream_failed_hint;
         if (model.assets_missing) return assets_missing_hint;
         const track = model.nowTrack() orelse return "Pick an album or a song to start";
-        // The honest third state: a stalled stream is not paused, but
-        // nothing is coming out of the speakers either — say so where
-        // the artist normally reads.
-        if (model.buffering) return buffering_hint;
         if (track.artist.len > 0) return track.artist;
         const album = model.userAlbumById(track.album) orelse return "";
         return album.artist();
-    }
-
-    pub fn progressFraction(model: *const Model) f32 {
-        if (model.now == null or model.now_duration_ms == 0) return 0;
-        const fraction = @as(f32, @floatFromInt(model.elapsed_ms)) / @as(f32, @floatFromInt(model.now_duration_ms));
-        return std.math.clamp(fraction, 0, 1);
-    }
-
-    pub fn elapsedLabel(model: *const Model, arena: std.mem.Allocator) []const u8 {
-        if (model.now == null) return "-:--";
-        return formatMs(arena, model.elapsed_ms);
-    }
-
-    pub fn durationLabel(model: *const Model, arena: std.mem.Allocator) []const u8 {
-        if (model.now == null) return "-:--";
-        return formatMs(arena, model.now_duration_ms);
     }
 
     /// Playlist rows for the queue panel (includes the now-playing track
@@ -1091,43 +817,26 @@ pub const Model = struct {
         return null;
     }
 
-    /// Albums matching the search query, derived into the build arena.
+    /// Visible albums, derived into the build arena.
     pub fn visibleAlbums(model: *const Model, arena: std.mem.Allocator) []const AlbumCell {
         const out = arena.alloc(AlbumCell, model.user_album_count) catch return &.{};
         var count: usize = 0;
         for (model.user_albums[0..model.user_album_count]) |*user| {
             if (model.tracksInAlbum(user.id) == 0) continue;
             const album = user.asAlbum();
-            if (!model.albumMatches(&album)) continue;
             out[count] = .{
                 .id = album.id,
                 .title = album.title,
                 .artist = album.artist,
                 .initials = album.initials,
                 .cover = model.coverFor(album.id),
-                .playing = model.playingAlbum() == album.id,
             };
             count += 1;
         }
         return out[0..count];
     }
 
-    /// Library tracks matching the search query (title, artist, or album),
-    /// derived into the build arena.
-    pub fn visibleTracks(model: *const Model, arena: std.mem.Allocator) []const TrackRow {
-        const out = arena.alloc(TrackRow, model.user_track_count) catch return &.{};
-        var count: usize = 0;
-        for (model.user_tracks[0..model.user_track_count]) |*user| {
-            const track = user.asTrack();
-            if (!model.trackMatches(&track)) continue;
-            out[count] = model.trackRow(arena, track, .with_album);
-            count += 1;
-        }
-        return out[0..count];
-    }
-
-    /// One album's tracks for the detail view (never search-filtered: the
-    /// detail page is the whole record).
+    /// One album's tracks for the detail view.
     pub fn albumTrackRows(model: *const Model, arena: std.mem.Allocator, album_id: u8) []const TrackRow {
         const total = model.tracksInAlbum(album_id);
         const out = arena.alloc(TrackRow, total) catch return &.{};
@@ -1139,29 +848,6 @@ pub const Model = struct {
             count += 1;
         }
         return out[0..count];
-    }
-
-    pub fn playingAlbum(model: *const Model) u8 {
-        const track = model.nowTrack() orelse return 0;
-        return if (model.playing) track.album else 0;
-    }
-
-    fn albumMatches(model: *const Model, album: *const Album) bool {
-        const query = model.search();
-        if (query.len == 0) return true;
-        return containsIgnoreCase(album.title, query) or containsIgnoreCase(album.artist, query);
-    }
-
-    fn trackMatches(model: *const Model, track: *const Track) bool {
-        const query = model.search();
-        if (query.len == 0) return true;
-        const album = model.userAlbumById(track.album);
-        const album_artist = if (album) |a| a.artist() else "";
-        const album_title = if (album) |a| a.title() else "";
-        return containsIgnoreCase(track.title, query) or
-            containsIgnoreCase(track.artist, query) or
-            containsIgnoreCase(album_artist, query) or
-            containsIgnoreCase(album_title, query);
     }
 
     const TrackRowStyle = enum { with_album, number_only };
@@ -1183,15 +869,11 @@ pub const Model = struct {
             .now = model.now == track.id,
             .playing = model.now == track.id and model.playing,
             .selected = model.selected == track.id,
-            .queued = model.isQueued(track.id),
             .removable = isUserTrackId(track.id),
         };
     }
 
     fn isQueued(model: *const Model, track_id: u8) bool {
-        // The now-playing track can sit in the playlist; the "Up next"
-        // badge is only for entries still waiting their turn.
-        if (model.now == track_id) return false;
         for (model.queue[0..model.queue_len]) |queued| {
             if (queued == track_id) return true;
         }
@@ -1398,7 +1080,6 @@ pub const Model = struct {
             model.elapsed_ms = 0;
             model.now_duration_ms = 0;
             model.platform_duration_ms = 0;
-            model.buffering = false;
         }
         if (model.selected == id) model.selected = null;
         if (path_len > 0) deleteManagedMediaFile(model, path_buf[0..path_len]);
@@ -1630,7 +1311,6 @@ pub const Model = struct {
         model.editing_track = id;
         model.edit_title_buffer.set(track.title());
         model.edit_artist_buffer.set(track.artist());
-        model.edit_year_buffer.clear();
         return true;
     }
 
@@ -1649,7 +1329,6 @@ pub const Model = struct {
         model.editing_track = null;
         model.edit_title_buffer.clear();
         model.edit_artist_buffer.clear();
-        model.edit_year_buffer.clear();
     }
 
     pub fn beginEditAlbum(model: *Model, id: u8) bool {
@@ -1658,9 +1337,6 @@ pub const Model = struct {
         model.editing_album = id;
         model.edit_title_buffer.set(album.title());
         model.edit_artist_buffer.set(album.artist());
-        var year_buf: [8]u8 = undefined;
-        const year_text = std.fmt.bufPrint(&year_buf, "{d}", .{album.year}) catch return false;
-        model.edit_year_buffer.set(year_text);
         return true;
     }
 
@@ -1669,12 +1345,8 @@ pub const Model = struct {
         const album = model.userAlbumByIdMut(id) orelse return false;
         const title = std.mem.trim(u8, model.edit_title_buffer.text(), " \t");
         if (title.len == 0) return false;
-        const year_text = std.mem.trim(u8, model.edit_year_buffer.text(), " \t");
-        const year = std.fmt.parseInt(u16, year_text, 10) catch return false;
-        if (year == 0) return false;
         album.setTitle(title);
         album.setArtist(std.mem.trim(u8, model.edit_artist_buffer.text(), " \t"));
-        album.setYear(year);
         model.cancelEditAlbum();
         return true;
     }
@@ -1683,7 +1355,6 @@ pub const Model = struct {
         model.editing_album = null;
         model.edit_title_buffer.clear();
         model.edit_artist_buffer.clear();
-        model.edit_year_buffer.clear();
     }
 };
 
@@ -1693,7 +1364,6 @@ pub const AlbumCell = struct {
     artist: []const u8,
     initials: []const u8,
     cover: canvas.ImageId,
-    playing: bool,
 };
 
 pub const TrackRow = struct {
@@ -1707,7 +1377,6 @@ pub const TrackRow = struct {
     playing: bool,
     /// This track is the SELECTION (accent row) — see `Model.selected`.
     selected: bool,
-    queued: bool,
     /// User-imported tracks can be removed from the library.
     removable: bool,
 };
@@ -1715,16 +1384,6 @@ pub const TrackRow = struct {
 fn formatMs(arena: std.mem.Allocator, ms: u32) []const u8 {
     const total_seconds = ms / 1000;
     return std.fmt.allocPrint(arena, "{d}:{d:0>2}", .{ total_seconds / 60, total_seconds % 60 }) catch "";
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var index: usize = 0;
-    while (index + needle.len <= haystack.len) : (index += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
-    }
-    return false;
 }
 
 fn appendFmt(buffer: []u8, len: *usize, comptime fmt: []const u8, args: anytype) void {
@@ -1831,16 +1490,16 @@ fn requestSessionLoad(model: *Model, fx: *Effects) void {
 fn playModeName(mode: PlayMode) []const u8 {
     return switch (mode) {
         .list_loop => "list_loop",
-        .single_loop => "single_loop",
-        .shuffle => "shuffle",
         .sequential => "sequential",
     };
 }
 
 fn parsePlayMode(name: []const u8) ?PlayMode {
     if (std.mem.eql(u8, name, "list_loop")) return .list_loop;
-    if (std.mem.eql(u8, name, "single_loop")) return .single_loop;
-    if (std.mem.eql(u8, name, "shuffle")) return .shuffle;
+    // Older sessions used both modes; preserve their safe wrapping
+    // behavior after the two-mode transport migration.
+    if (std.mem.eql(u8, name, "single_loop")) return .list_loop;
+    if (std.mem.eql(u8, name, "shuffle")) return .list_loop;
     if (std.mem.eql(u8, name, "sequential")) return .sequential;
     return null;
 }
@@ -2013,7 +1672,6 @@ fn pickAndImportMusic(model: *Model, fx: *Effects) void {
     if (added > 0) {
         model.library_notice = .added;
         model.library_notice_count = added;
-        model.tab = .songs;
         persistLibrary(model, fx);
     } else if (hit_full) {
         model.library_notice = .full;
@@ -2144,7 +1802,6 @@ fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
 
     model.library_notice = .added;
     model.library_notice_count = added;
-    model.tab = .albums;
     model.open_album = album_id;
     model.detail_scroll = 0;
     persistLibrary(model, fx);
@@ -2219,14 +1876,16 @@ fn applySessionResume(model: *Model, fx: *Effects) void {
     fx.setAudioVolume(model.volume);
     const id = model.session_resume_track orelse return;
     const elapsed = model.session_resume_elapsed_ms;
-    const playing = model.session_resume_playing;
+    // Always resume paused: launching the app must not auto-play, even
+    // when the previous run quit mid-playback (`playing` in the store).
     model.session_resume_track = null;
+    model.session_resume_playing = false;
     startTrack(model, fx, id);
     if (elapsed > 0) {
         model.elapsed_ms = elapsed;
         fx.seekAudio(elapsed);
     }
-    if (!playing) setPlaying(model, fx, false);
+    setPlaying(model, fx, false);
 }
 
 fn applyCoverBytes(model: *Model, fx: *Effects, album_id: u8, bytes: []const u8) bool {
@@ -2239,23 +1898,16 @@ fn applyCoverBytes(model: *Model, fx: *Effects, album_id: u8, bytes: []const u8)
     return true;
 }
 
+fn closeHeaderMenus(model: *Model) void {
+    model.header_menu_open = false;
+    model.add_menu_open = false;
+}
+
 // ------------------------------------------------------------------ update
 
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
-    defer syncScrubberTimer(model, fx);
+    defer syncAudioPollTimer(model, fx);
     switch (msg) {
-        .show_albums => {
-            model.tab = .albums;
-            model.add_menu_open = false;
-        },
-        .show_songs => {
-            model.tab = .songs;
-            model.add_menu_open = false;
-        },
-        .toggle_library_view => {
-            model.tab = if (model.tab == .albums) .songs else .albums;
-            model.add_menu_open = false;
-        },
         .toggle_theme => {
             // Lock to the opposite of whatever is showing now (system-
             // follow included): first press leaves the OS and every
@@ -2264,9 +1916,18 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .light => .dark,
                 .dark => .light,
             };
+            closeHeaderMenus(model);
             persistSession(model, fx);
         },
-        .toggle_add_menu => model.add_menu_open = !model.add_menu_open,
+        .toggle_header_menu => {
+            model.header_menu_open = !model.header_menu_open;
+            if (model.header_menu_open) model.add_menu_open = false;
+        },
+        .close_header_menu => model.header_menu_open = false,
+        .toggle_add_menu => {
+            model.add_menu_open = !model.add_menu_open;
+            if (model.add_menu_open) model.header_menu_open = false;
+        },
         .close_add_menu => model.add_menu_open = false,
         .set_appearance => |appearance| model.appearance = appearance,
         .chrome_changed => |chrome| {
@@ -2275,46 +1936,32 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // trailing) — the unused edge arrives as an honest zero.
             model.chrome_leading = chrome.insets.left;
             model.chrome_trailing = chrome.insets.right;
-            // The raw top/bottom bands, for the compact shell's
-            // safe-area padding: on phones the same channel carries the
-            // status bar / Dynamic Island above and the home indicator
-            // below, and the compact shell pads exactly these.
-            model.chrome_top = chrome.insets.top;
-            model.chrome_bottom = chrome.insets.bottom;
-            // Match the header to the titlebar band so its centered
-            // controls share the traffic lights' centerline; the natural
-            // height is the floor when no band overlays the content.
-            model.header_height = @max(header_natural_height, chrome.insets.top);
-            // Host-reported form factor: adopt when the host says one
-            // (sticky — see the field), leave the width fallback in
-            // charge when it never does.
-            switch (chrome.form_factor) {
-                .compact => model.host_form_factor = .compact,
-                .regular => model.host_form_factor = .regular,
-                .unknown => {},
-            }
-            // Whether a native bar owns the tab affordance right now:
-            // the compact header's switcher yields exactly while it is
-            // projected.
-            model.native_tabs = chrome.tabs_projected;
+            // Match the header to the titlebar band so cross-centered
+            // controls sit on the band midline; the natural height is
+            // the floor when no band overlays the content. Prefer the
+            // live inset when the host reports one — never grow taller
+            // than the OS band, or the painted chrome outruns the
+            // titlebar and the controls read as top-heavy.
+            model.header_height = if (chrome.insets.top > 0)
+                chrome.insets.top
+            else
+                header_natural_height;
         },
         .canvas_resized => |width| model.canvas_width = width,
-        .search_edit => |edit| model.search_buffer.apply(edit),
         .grid_scrolled => |state| model.grid_scroll = state.offset,
         .detail_scrolled => |state| model.detail_scroll = state.offset,
-        .songs_scrolled => |state| model.songs_scroll = state.offset,
         .open_album => |id| {
             model.open_album = id;
-            model.tab = .albums;
             // A fresh record opens at its top.
             model.detail_scroll = 0;
         },
         .close_album => model.open_album = null,
         .play_album => |id| {
             const first = model.firstTrackIdInAlbum(id) orelse return;
-            // Replace the playlist with the whole album so the panel shows
-            // every track and list_loop / sequential / shuffle walk that
-            // list instead of consuming a one-shot "up next" FIFO.
+            // Replace the playlist with the whole album so list_loop /
+            // sequential walk that list instead of consuming a
+            // one-shot "up next" FIFO. Leave the panel closed — Play Album
+            // starts playback; the user opens the queue when they want it.
             model.queue_len = 0;
             model.queue_dropped = 0;
             const count = model.tracksInAlbum(id);
@@ -2323,7 +1970,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const track = model.userTrackInAlbumByNumber(id, number) orelse continue;
                 model.pushQueue(track.id);
             }
-            if (model.queue_len > 0) model.queue_open = true;
             startTrack(model, fx, first);
         },
         .play_track => |id| playOrToggle(model, fx, id),
@@ -2334,17 +1980,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.selected) |id| playOrToggle(model, fx, id);
         },
         .frame_clock => |frame| advanceRenderedClock(model, frame),
-        .scrubber_tick => |timer| {
-            if (timer.outcome == .rejected) {
-                model.scrubber_timer_armed = false;
-                model.scrubber_degraded = true;
-                return;
-            }
+        .audio_poll => |timer| {
             if (timer.outcome != .fired) return;
-            advanceRenderedClock(model, .{
-                .timestamp_ns = timer.timestamp_ns,
-                .interval_ns = scrubber_interval_ms * std.time.ns_per_ms,
-            });
+            pollAudioChannel(model, fx);
         },
         .toggle_play => {
             if (model.now == null) {
@@ -2359,26 +1997,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .prev_track => previous(model, fx),
         .cycle_play_mode => {
             model.play_mode = switch (model.play_mode) {
-                .list_loop => .single_loop,
-                .single_loop => .shuffle,
-                .shuffle => .sequential,
+                .list_loop => .sequential,
                 .sequential => .list_loop,
             };
             persistSession(model, fx);
         },
-        .seeked => {
-            if (model.now != null) {
-                const duration: f32 = @floatFromInt(model.now_duration_ms);
-                const target: u32 = @intFromFloat(std.math.clamp(model.seek_fraction, 0, 1) * duration);
-                // Optimistic mirror for the labels; the platform seek has
-                // no echo — the next position tick reports from there.
-                model.elapsed_ms = target;
-                fx.seekAudio(target);
-                persistSession(model, fx);
-            }
-        },
-        .volume_changed => {
-            model.volume = std.math.clamp(model.volume, 0, 1);
+        .volume_changed => |value| {
+            model.volume = std.math.clamp(value, 0, 1);
             fx.setAudioVolume(model.volume);
             persistSession(model, fx);
         },
@@ -2410,29 +2035,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.queue_open = true;
             persistSession(model, fx);
         },
-        .copy_title => |id| {
-            const title = if (model.resolveTrack(id)) |track| track.title else "";
-            fx.spawn(.{
-                .key = copy_key,
-                .argv = &.{"/usr/bin/pbcopy"},
-                .stdin = title,
-                .on_exit = Effects.exitMsg(.copied),
-            });
-        },
-        .copied => |exit| {
-            if (exit.reason == .exited and exit.code == 0) {
-                model.copies_done += 1;
-                model.copy_failed = false;
-            } else {
-                model.copy_failed = true;
-            }
-        },
         .add_music => {
-            model.add_menu_open = false;
+            closeHeaderMenus(model);
             pickAndImportMusic(model, fx);
         },
         .import_album => {
-            model.add_menu_open = false;
+            closeHeaderMenus(model);
             pickAndImportAlbum(model, fx);
         },
         .remove_track => |id| {
@@ -2454,7 +2062,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .edit_title => |edit| model.edit_title_buffer.apply(edit),
         .edit_artist => |edit| model.edit_artist_buffer.apply(edit),
-        .edit_year => |edit| model.edit_year_buffer.apply(edit),
         .save_edit_track => {
             if (!model.applyEditTrack()) return;
             model.library_notice = .updated;
@@ -2536,20 +2143,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 /// id, so a straggler for a track the model no longer plays is dropped
 /// by identity — never misattributed to the current one.
 ///
-/// THE DURATION RULE. Events carry the platform player's own duration
-/// readout, and for this catalog that number is an ESTIMATE, never the
-/// truth: the prepare script strips the seek header from every prepared
-/// file (nothing of the source encoder may survive the strip), so a
-/// decoder can only extrapolate the length from the bitrate it has seen
-/// — a progressive stream's early guess has measured minutes wrong, and
-/// even a fully local file reads seconds long and wobbles between
-/// ticks. The manifest duration was measured from the intact SOURCE
-/// file and matches a full decode exactly, so `now_duration_ms` (the
-/// displayed total, the scrubber's denominator, the seek target's
-/// scale) keeps the manifest value and the platform's report only lands
-/// in `platform_duration_ms` — adopted as the total solely when the
-/// manifest carries no duration at all. Positions are different:
-/// position ticks are the player's REAL clock and stay authoritative.
+/// Events carry the platform player's own duration and position readout.
+/// Imported tracks can begin without a known duration, so the first
+/// platform report fills that value for the session and library record.
 fn handleAudioEvent(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) void {
     const now = model.now orelse return;
     if (event.key != now) return;
@@ -2558,23 +2154,18 @@ fn handleAudioEvent(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) 
             adoptPlatformDuration(model, fx, event.duration_ms);
             model.elapsed_ms = @intCast(event.position_ms);
             model.playing = event.playing;
-            model.buffering = event.buffering;
         },
         .position => {
             const position: u32 = @intCast(event.position_ms);
             adoptPlatformDuration(model, fx, event.duration_ms);
-            // The stream's honest stall flag rides every tick; local
-            // files always report false.
-            model.buffering = event.buffering;
-            // The coarse tick CORRECTS the frame-advanced rendered
-            // clock. In motion, forward corrections apply and small
-            // backward ones hold flat — the bar must never visibly
-            // rewind because our frames ran a few ms ahead of the
-            // player — while a past-slack disagreement is a real
-            // desync (an external seek, an unreported stall) and
-            // snaps. With no motion (paused, buffering) the tick is
-            // simply the truth.
-            if (model.playing and !model.buffering) {
+            // The coarse tick CORRECTS any frame-advanced rendered
+            // clock (journal path). In motion, forward corrections
+            // apply and small backward ones hold flat — elapsed must
+            // never visibly rewind because frames ran a few ms ahead
+            // of the player — while a past-slack disagreement is a
+            // real desync (an external seek) and snaps. When paused the
+            // tick is simply the truth.
+            if (model.playing) {
                 if (position > model.elapsed_ms or model.elapsed_ms - position > position_snap_slack_ms) {
                     model.elapsed_ms = position;
                 }
@@ -2583,29 +2174,18 @@ fn handleAudioEvent(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) 
             }
         },
         // Real band-magnitude reports from hosts that analyze their own
-        // playback. WellMusic draws no analyzer — its identity is
-        // the clean catalog, not phosphor glass — so the reports are
-        // consciously ignored (the deck is the surface that adopts
-        // them).
+        // playback. WellMusic draws no analyzer — and live playback does
+        // not register `on_event`, so these never reach update on device.
+        // Kept as a no-op for journal / test feeds that still send them.
         .spectrum => {},
         .completed => onTrackCompleted(model, fx),
         .failed, .rejected => {
-            // Playback could not run. With a URL base configured the
-            // local-file miss would have streamed, so a failure here
-            // means the NETWORK let the playback down (offline with a
-            // cold cache, a dead host, a mid-flight drop); without one
-            // it means the local file is gone/unreadable (or the host
-            // has no audio playback). Two notices, two remedies — and
-            // the catalog keeps browsing fine either way. Persist so a
-            // later launch does not keep auto-resuming a dead path.
-            if (model.streamingConfigured()) {
-                model.stream_failed = true;
-            } else {
-                model.assets_missing = true;
-            }
+            // Playback could not run because the local file is unreadable
+            // or the host cannot decode it. Persist so a later launch
+            // does not keep auto-resuming a dead path.
+            model.assets_missing = true;
             model.now = null;
             model.playing = false;
-            model.buffering = false;
             model.elapsed_ms = 0;
             model.now_duration_ms = 0;
             model.platform_duration_ms = 0;
@@ -2651,16 +2231,10 @@ fn playOrToggle(model: *Model, fx: *Effects, track_id: u8) void {
 
 const SelectionStep = enum { previous, next };
 
-/// Whether a track sits in the track list currently on screen — the
-/// domain the arrow-key selection walks. Songs tab: the search-filtered
-/// library (the same predicate `visibleTracks` renders). Album detail:
-/// the whole record, never filtered (matching `albumTrackRows`). The
-/// album GRID shows no track list, so arrows move nothing there.
+/// Whether a track sits in the album detail list currently on screen.
+/// The album grid has no track list, so arrows move nothing there.
 fn trackInCurrentList(model: *const Model, track: Track) bool {
-    return switch (model.tab) {
-        .songs => model.trackMatches(&track),
-        .albums => if (model.open_album) |album_id| track.album == album_id else false,
-    };
+    return if (model.open_album) |album_id| track.album == album_id else false;
 }
 
 /// Move the selection one row up or down the visible track list,
@@ -2698,39 +2272,75 @@ fn moveSelection(model: *Model, step: SelectionStep) void {
     if (target) |id| model.selected = id;
 }
 
-/// Arm or disarm the ~20 Hz scrubber timer so the seek bar advances
-/// without a display-rate Metal loop. Idempotent: only start/cancel on
-/// edge transitions (re-arming every update would starve fires). When
-/// the host rejected the timer, stay disarmed for this play session
-/// (`scrubber_degraded`) and clear that latch once `want` falls.
-fn syncScrubberTimer(model: *Model, fx: *Effects) void {
-    const want = model.playing and model.now != null and !model.buffering;
-    if (!want) model.scrubber_degraded = false;
-    const effective = want and !model.scrubber_degraded;
-    if (effective == model.scrubber_timer_armed) return;
-    model.scrubber_timer_armed = effective;
-    if (effective) {
+/// Arm or disarm the ~2 Hz audio poll while actually playing.
+/// Paused / idle stay quiet. Idempotent edge transitions only
+/// (re-arming every update starves fires).
+fn syncAudioPollTimer(model: *Model, fx: *Effects) void {
+    const want = model.playing and model.now != null;
+    if (want == model.audio_poll_armed) return;
+    model.audio_poll_armed = want;
+    if (want) {
         fx.startTimer(.{
-            .key = scrubber_timer_key,
-            .interval_ms = scrubber_interval_ms,
+            .key = audio_poll_timer_key,
+            .interval_ms = audio_poll_interval_ms,
             .mode = .repeating,
-            .on_fire = Effects.timerMsg(.scrubber_tick),
+            .on_fire = Effects.timerMsg(.audio_poll),
         });
     } else {
-        fx.cancelTimer(scrubber_timer_key);
+        fx.cancelTimer(audio_poll_timer_key);
     }
 }
 
-/// One presented frame while playing: advance the rendered clock by the
-/// real frame delta, clamped to a few display intervals so a stale gap
-/// (resume after pause, an occluded window, boot) steps gently instead
-/// of lurching, and capped at the duration. Motion-gated twice — the
-/// live timer / `on_frame` hook only emit while playing, and this
-/// re-checks so a replayed journal straddling a pause boundary stays exact.
+/// Mirror the platform player into the model without riding `on_event`
+/// (which would also deliver ~25 Hz spectrum reports into TEA).
+/// Platform events still update the effects-channel mirrors; this only
+/// copies them into Model at poll cadence.
+fn pollAudioChannel(model: *Model, fx: *Effects) void {
+    const now_id = model.now orelse return;
+    const snap = fx.audioSnapshot();
+    if (snap.active and snap.key != now_id) return;
+    if (!snap.active) {
+        // Player gone while we still hold this track — treat as failure
+        // (decode miss, host without audio, stopped under us).
+        model.assets_missing = true;
+        model.now = null;
+        model.playing = false;
+        model.elapsed_ms = 0;
+        model.now_duration_ms = 0;
+        model.platform_duration_ms = 0;
+        persistSession(model, fx);
+        return;
+    }
+
+    adoptPlatformDuration(model, fx, snap.duration_ms);
+    const position: u32 = @intCast(@min(snap.position_ms, std.math.maxInt(u32)));
+
+    // We still show playing but the transport stopped → natural end.
+    // User pause sets `model.playing = false` before `pauseAudio`, so it
+    // never takes this branch.
+    if (model.playing and !snap.playing) {
+        model.elapsed_ms = if (model.now_duration_ms > 0) model.now_duration_ms else position;
+        onTrackCompleted(model, fx);
+        return;
+    }
+
+    if (model.playing) {
+        if (position > model.elapsed_ms or model.elapsed_ms - position > position_snap_slack_ms) {
+            model.elapsed_ms = position;
+        }
+    } else {
+        model.elapsed_ms = position;
+    }
+}
+
+/// Journal/test path: advance the rendered clock by the real frame
+/// delta, clamped to a few display intervals so a stale gap steps
+/// gently, and capped at the duration. Motion-gated so a replayed
+/// journal straddling a pause boundary stays exact.
 fn advanceRenderedClock(model: *Model, frame: FrameClock) void {
     const last = model.frame_ns;
     model.frame_ns = frame.timestamp_ns;
-    if (!model.playing or model.now == null or model.buffering) return;
+    if (!model.playing or model.now == null) return;
     const interval: u64 = if (frame.interval_ns > 0) frame.interval_ns else std.time.ns_per_s / 60;
     const delta_ns: u64 = if (last == 0 or frame.timestamp_ns <= last)
         interval
@@ -2762,29 +2372,13 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     // A fresh attempt clears the degraded notices; if the source is
     // still unplayable the `.failed` event raises the right one again.
     model.assets_missing = false;
-    model.stream_failed = false;
-    model.buffering = false;
     model.playing = true;
-    // The source cascade rides ONE playAudio call: the prepared local
-    // file first, then (URL base configured) the track's URL — where
-    // the platform plays a verified cache entry locally or streams
-    // progressively while filling the cache, keyed by the URL's hash
-    // under the platform caches directory. `expected_bytes` is the
-    // manifest's prepared size, the integrity gate that keeps partial
-    // or stale cache entries from ever playing. The strings are copied
-    // at call time, so stack buffers are fine here.
-    // User imports are path-only (no streaming base for absolute files).
-    var url_buffer: [max_url_base + 512]u8 = undefined;
-    var url: []const u8 = "";
-    if (track.file.len > 0 and model.streamingConfigured()) {
-        url = std.fmt.bufPrint(&url_buffer, "{s}/{s}", .{ model.urlBase(), track.file }) catch "";
-    }
-    // Path-only imports store absolute filesystem paths. If the user
-    // moved or deleted the file, fail before asking the host — and
+    // Imported tracks are local paths. If a file was moved or deleted,
+    // fail before asking the host — and
     // persist so session resume does not keep retrying a dead path.
     // Fake-executor tests seed placeholder paths; skip the open check
     // there so playback logic stays unit-testable without real files.
-    if (url.len == 0 and fx.executor != .fake and !localAudioReadable(track.path)) {
+    if (fx.executor != .fake and !localAudioReadable(track.path)) {
         model.assets_missing = true;
         model.now = null;
         model.playing = false;
@@ -2794,20 +2388,14 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
         persistSession(model, fx);
         return;
     }
-    var cache_buffer: [max_cache_dir + 128]u8 = undefined;
-    var cache_path: []const u8 = "";
-    if (url.len > 0 and model.cacheDir().len > 0) {
-        cache_path = native_sdk.audioCachePath(&cache_buffer, model.cacheDir(), url) catch "";
-    }
     // One player total: a new playAudio replaces whatever played before,
-    // and the track id keys every event back to this playback.
+    // and the track id keys the audioSnapshot mirror. `on_event` is
+    // intentionally omitted — the host pushes ~25 Hz `.spectrum` reports
+    // that would otherwise rebuild the whole UI; `audio_poll` mirrors
+    // position / completion / failure from the snapshot instead.
     fx.playAudio(.{
         .key = track_id,
         .path = track.path,
-        .url = url,
-        .cache_path = cache_path,
-        .expected_bytes = track.bytes,
-        .on_event = Effects.audioMsg(.audio_event),
     });
     fx.setAudioVolume(model.volume);
     persistSession(model, fx);
@@ -2840,13 +2428,8 @@ fn setPlaying(model: *Model, fx: *Effects, playing: bool) void {
     persistSession(model, fx);
 }
 
-/// A track finished: single-loop restarts it; every other mode asks the
-/// same skip path the next button uses (playlist / play-next / album).
+/// A track finished through the same path the next button uses.
 fn onTrackCompleted(model: *Model, fx: *Effects) void {
-    if (model.play_mode == .single_loop) {
-        if (model.now) |id| startTrack(model, fx, id);
-        return;
-    }
     skipForward(model, fx, true);
 }
 
@@ -2871,7 +2454,7 @@ fn skipForward(model: *Model, fx: *Effects, from_completion: bool) void {
     if (count == 0) return;
 
     switch (model.play_mode) {
-        .list_loop, .single_loop => {
+        .list_loop => {
             const next_number: u8 = @intCast((@as(usize, track.number) % count) + 1);
             const next = model.userTrackInAlbumByNumber(track.album, next_number) orelse return;
             startTrack(model, fx, next.id);
@@ -2884,10 +2467,6 @@ fn skipForward(model: *Model, fx: *Effects, from_completion: bool) void {
             const next = model.userTrackInAlbumByNumber(track.album, track.number + 1) orelse return;
             startTrack(model, fx, next.id);
         },
-        .shuffle => {
-            const next_id = pickShuffledAlbumTrack(model, track) orelse return;
-            startTrack(model, fx, next_id);
-        },
     }
 }
 
@@ -2895,7 +2474,7 @@ fn advanceWithinPlaylist(model: *Model, fx: *Effects, idx: usize, from_completio
     const len = model.queue_len;
     if (len == 0) return;
     switch (model.play_mode) {
-        .list_loop, .single_loop => {
+        .list_loop => {
             const next = (idx + 1) % len;
             startTrack(model, fx, model.queue[next]);
         },
@@ -2906,60 +2485,17 @@ fn advanceWithinPlaylist(model: *Model, fx: *Effects, idx: usize, from_completio
             }
             startTrack(model, fx, model.queue[idx + 1]);
         },
-        .shuffle => {
-            const next_id = pickShuffledPlaylistTrack(model, idx) orelse return;
-            startTrack(model, fx, next_id);
-        },
     }
 }
 
 fn stopAtEnd(model: *Model) void {
     model.playing = false;
-    model.buffering = false;
     if (model.now_duration_ms > 0) model.elapsed_ms = model.now_duration_ms;
-}
-
-/// Another track in the playlist, never the current slot when there is
-/// a choice. Uniform over the remaining indices.
-fn pickShuffledPlaylistTrack(model: *Model, current_idx: usize) ?u8 {
-    const len = model.queue_len;
-    if (len == 0) return null;
-    if (len == 1) return model.queue[0];
-    model.shuffle_nonce +%= 1;
-    var prng = std.Random.DefaultPrng.init(
-        model.shuffle_nonce *% 0x9E3779B97F4A7C15 ^
-            (@as(u64, model.queue[current_idx]) << 32) ^
-            model.frame_ns ^
-            (@as(u64, model.elapsed_ms) << 17),
-    );
-    const roll = prng.random().intRangeLessThan(usize, 0, len - 1);
-    const next_idx = if (roll >= current_idx) roll + 1 else roll;
-    return model.queue[next_idx];
-}
-
-/// Another track in the same album, never the current one when there is
-/// a choice. Uniform over the remaining numbers.
-fn pickShuffledAlbumTrack(model: *Model, current: Track) ?u8 {
-    const count = model.tracksInAlbum(current.album);
-    if (count == 0) return null;
-    if (count == 1) return current.id;
-    model.shuffle_nonce +%= 1;
-    var prng = std.Random.DefaultPrng.init(
-        model.shuffle_nonce *% 0x9E3779B97F4A7C15 ^
-            (@as(u64, current.id) << 32) ^
-            model.frame_ns ^
-            (@as(u64, model.elapsed_ms) << 17),
-    );
-    const roll = prng.random().intRangeLessThan(usize, 0, count - 1);
-    var number: u8 = @intCast(roll + 1);
-    if (number >= current.number) number += 1;
-    const next = model.userTrackInAlbumByNumber(current.album, number) orelse return null;
-    return next.id;
 }
 
 /// Restart the current track when it is a few seconds in; otherwise the
 /// previous track in the playlist (or album). Sequential mode does not
-/// wrap past the first track; the looping modes (and shuffle) wrap.
+/// wrap past the first track; list loop wraps.
 fn previous(model: *Model, fx: *Effects) void {
     const track = model.nowTrack() orelse return;
     if (model.elapsed_ms > 3000) {

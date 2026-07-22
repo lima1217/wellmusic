@@ -1,5 +1,5 @@
 //! wellmusic tests: user library add/remove/persist, empty-library UI,
-//! theming, chrome, shell switching, and markup parity. There is no
+//! theming, chrome, and markup parity. There is no
 //! built-in sample catalog — playback assertions seed imported tracks.
 
 const std = @import("std");
@@ -36,15 +36,6 @@ fn applyFx(model: *Model, msg: Msg, fx: *model_mod.Effects) void {
     main.update(model, msg, fx);
 }
 
-fn scrubberTimerPending(fx: *model_mod.Effects) bool {
-    var i: usize = 0;
-    while (i < fx.pendingTimerCount()) : (i += 1) {
-        const timer = fx.pendingTimerAt(i) orelse continue;
-        if (timer.key == model_mod.scrubber_timer_key) return true;
-    }
-    return false;
-}
-
 fn findByText(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.Widget {
     if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget;
     for (widget.children) |child| {
@@ -74,8 +65,6 @@ fn collectIds(widget: canvas.Widget, ids: *std.ArrayListUnmanaged(canvas.ObjectI
 }
 
 const surface_size = geometry.SizeF.init(main.window_width, main.window_height);
-const phone_size = geometry.SizeF.init(393, 852);
-
 const LiveApp = struct {
     harness: *native_sdk.TestHarness(),
     app_state: *App,
@@ -120,11 +109,11 @@ const LiveApp = struct {
 };
 
 test "no built-in sample catalog" {
-    try testing.expectEqual(@as(usize, 0), model_mod.albums.len);
-    try testing.expectEqual(@as(usize, 0), model_mod.tracks.len);
     try testing.expectEqual(@as(u8, 1), model_mod.imported_album_id);
     try testing.expectEqual(@as(u8, 1), model_mod.first_user_track_id);
-    try testing.expectEqualStrings("", model_mod.manifest_url_base);
+    const model = Model{};
+    try testing.expectEqual(@as(usize, 0), model.user_album_count);
+    try testing.expectEqual(@as(usize, 0), model.user_track_count);
 }
 
 test "user library add remove and persist round-trip" {
@@ -218,7 +207,7 @@ test "edit song info updates title and artist" {
     try testing.expectEqualStrings("Someone", model.user_tracks[0].artist());
 }
 
-test "edit album info updates title artist and year" {
+test "edit album info updates title and artist" {
     var model: Model = .{};
     const album_id = model.addUserAlbum("Blue Album", "Weezer") orelse return error.TestUnexpectedResult;
     try testing.expect(model.addUserTrackToAlbum(album_id, "/Music/Weezer/Blue Album/01.mp3"));
@@ -227,13 +216,11 @@ test "edit album info updates title artist and year" {
     try testing.expect(!model.isEditingTrack());
     model.edit_title_buffer.set("Pinkerton");
     model.edit_artist_buffer.set("Weezer");
-    model.edit_year_buffer.set("1996");
     try testing.expect(model.applyEditAlbum());
     try testing.expect(!model.isEditingAlbum());
     const album = model.userAlbumById(album_id) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("Pinkerton", album.title());
     try testing.expectEqualStrings("Weezer", album.artist());
-    try testing.expectEqual(@as(u16, 1996), album.year);
 
     var buffer: [model_mod.max_library_store_bytes]u8 = undefined;
     const bytes = model.serializeLibrary(&buffer);
@@ -242,7 +229,6 @@ test "edit album info updates title artist and year" {
     const restored_album = restored.userAlbumById(album_id) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("Pinkerton", restored_album.title());
     try testing.expectEqualStrings("Weezer", restored_album.artist());
-    try testing.expectEqual(@as(u16, 1996), restored_album.year);
 }
 
 test "empty library shows the add-music empty state" {
@@ -251,36 +237,28 @@ test "empty library shows the add-music empty state" {
     const tree = try buildTree(arena_state.allocator(), &Model{});
     try testing.expect(findByLabel(tree.root, "Empty library") != null);
     try testing.expect(findByLabel(tree.root, "Add to library") != null);
-    try testing.expect(findByLabel(tree.root, "Switch library view") != null);
+    try testing.expect(findByLabel(tree.root, "More") != null);
     try testing.expectEqual(@as(usize, 0), countListItems(tree.root));
 }
 
-test "library view toggle and add menu consolidate header actions" {
+test "header overflow consolidates add and theme actions" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     var model: Model = .{};
 
-    apply(&model, .toggle_library_view);
-    try testing.expectEqual(model_mod.Tab.songs, model.tab);
-    try testing.expectEqualStrings("music", model.libraryViewIcon());
-    const songs_header = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findByLabel(songs_header.root, "Switch library view") != null);
-
-    apply(&model, .toggle_library_view);
-    try testing.expectEqual(model_mod.Tab.albums, model.tab);
-    try testing.expectEqualStrings("app:albums", model.libraryViewIcon());
-
-    apply(&model, .toggle_add_menu);
-    try testing.expect(model.add_menu_open);
+    apply(&model, .toggle_header_menu);
+    try testing.expect(model.header_menu_open);
     const open_tree = try buildTree(arena_state.allocator(), &model);
+    try testing.expect(findByLabel(open_tree.root, "More") != null);
     try testing.expect(findByText(open_tree.root, .menu_item, "Add Song") != null);
     try testing.expect(findByText(open_tree.root, .menu_item, "Add Album") != null);
+    try testing.expect(findByText(open_tree.root, .menu_item, "Dark mode") != null);
 
-    apply(&model, .close_add_menu);
-    try testing.expect(!model.add_menu_open);
+    apply(&model, .close_header_menu);
+    try testing.expect(!model.header_menu_open);
 }
 
-test "imported tracks appear in albums and songs" {
+test "imported tracks appear in albums and edit dialogs" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     var model: Model = .{};
@@ -289,11 +267,6 @@ test "imported tracks appear in albums and songs" {
 
     const albums_tree = try buildTree(arena_state.allocator(), &model);
     try testing.expect(findByText(albums_tree.root, .text, "Library") != null);
-
-    apply(&model, .show_songs);
-    const songs_tree = try buildTree(arena_state.allocator(), &model);
-    try testing.expectEqual(@as(usize, 2), countListItems(songs_tree.root));
-    try testing.expect(findByText(songs_tree.root, .text, "Track A") != null);
 
     apply(&model, .{ .edit_track = model.user_tracks[0].id });
     const edit_tree = try buildTree(arena_state.allocator(), &model);
@@ -420,7 +393,7 @@ test "migrateExternalMedia copies legacy absolute paths into media/" {
     _ = model.removeUserTrack(model.user_tracks[0].id);
 }
 
-test "play mode cycles and drives list loop single loop sequential and shuffle" {
+test "play mode cycles between list loop and sequential" {
     var model = Model{};
     const album_id = model.addUserAlbum("Demo", "Artist") orelse return error.TestUnexpectedResult;
     try testing.expect(model.addUserTrackToAlbum(album_id, "/tmp/demo/01.mp3"));
@@ -433,12 +406,6 @@ test "play mode cycles and drives list loop single loop sequential and shuffle" 
     try testing.expectEqual(model_mod.PlayMode.list_loop, model.play_mode);
     try testing.expectEqualStrings("repeat", model.playModeIcon());
     apply(&model, .cycle_play_mode);
-    try testing.expectEqual(model_mod.PlayMode.single_loop, model.play_mode);
-    try testing.expectEqualStrings("app:repeat-1", model.playModeIcon());
-    apply(&model, .cycle_play_mode);
-    try testing.expectEqual(model_mod.PlayMode.shuffle, model.play_mode);
-    try testing.expectEqualStrings("shuffle", model.playModeIcon());
-    apply(&model, .cycle_play_mode);
     try testing.expectEqual(model_mod.PlayMode.sequential, model.play_mode);
     try testing.expectEqualStrings("app:sequential", model.playModeIcon());
     apply(&model, .cycle_play_mode);
@@ -449,15 +416,6 @@ test "play mode cycles and drives list loop single loop sequential and shuffle" 
     apply(&model, .{ .audio_event = .{ .key = c, .kind = .completed } });
     try testing.expectEqual(@as(?u8, a), model.now);
     try testing.expect(model.playing);
-
-    // Single loop restarts the same track on completion; next still advances.
-    model.play_mode = .single_loop;
-    apply(&model, .{ .play_track = b });
-    apply(&model, .{ .audio_event = .{ .key = b, .kind = .completed } });
-    try testing.expectEqual(@as(?u8, b), model.now);
-    try testing.expect(model.playing);
-    apply(&model, .next_track);
-    try testing.expectEqual(@as(?u8, c), model.now);
 
     // Sequential stops on the last track; next on the last is a no-op.
     model.play_mode = .sequential;
@@ -472,20 +430,6 @@ test "play mode cycles and drives list loop single loop sequential and shuffle" 
     apply(&model, .{ .play_track = a });
     apply(&model, .next_track);
     try testing.expectEqual(@as(?u8, b), model.now);
-
-    // Shuffle leaves the current album and never sticks on a solo choice
-    // when more than one track exists.
-    model.play_mode = .shuffle;
-    apply(&model, .{ .play_track = a });
-    var saw_other = false;
-    var i: usize = 0;
-    while (i < 24) : (i += 1) {
-        const before = model.now.?;
-        apply(&model, .next_track);
-        if (model.now.? != before) saw_other = true;
-        try testing.expect(model.now == a or model.now == b or model.now == c);
-    }
-    try testing.expect(saw_other);
 
     // Play Next still wins when the current track is not in the playlist.
     model.play_mode = .list_loop;
@@ -592,16 +536,18 @@ test "chrome geometry pads the header and matches its height to the tall band" {
     const msg = main.onChrome(chrome) orelse return error.TestUnexpectedResult;
     model_mod.update(&model, msg, &fx);
     try testing.expectEqual(@as(f32, 78), model.chrome_leading);
-    try testing.expectEqual(@max(model_mod.header_natural_height, 52), model.header_height);
+    try testing.expectEqual(@as(f32, 52), model.header_height);
     try testing.expectEqual(.hidden_inset_tall, main.shell_scene.windows[0].titlebar);
-}
 
-test "the form-factor rule: compact strictly below the desktop floor" {
-    var model = Model{};
-    model.canvas_width = model_mod.min_canvas_width;
-    try testing.expectEqual(model_mod.FormFactor.regular, model.formFactor());
-    model.canvas_width = model_mod.min_canvas_width - 1;
-    try testing.expectEqual(model_mod.FormFactor.compact, model.formFactor());
+    // A shorter host band must win: painting taller than the OS titlebar
+    // leaves cross-centered controls reading as top-heavy in the band.
+    const short_band: native_sdk.WindowChrome = .{
+        .insets = .{ .top = 44, .left = 78 },
+        .buttons = native_sdk.geometry.RectF.init(20, 15, 52, 14),
+    };
+    const short_msg = main.onChrome(short_band) orelse return error.TestUnexpectedResult;
+    model_mod.update(&model, short_msg, &fx);
+    try testing.expectEqual(@as(f32, 44), model.header_height);
 }
 
 test "markup engine parity: header and now-playing build identical trees" {
@@ -678,22 +624,9 @@ test "empty and seeded trees stay within the widget budget" {
         const path = try std.fmt.bufPrint(&path_buf, "/tmp/track-{d}.mp3", .{i});
         try testing.expect(model.addUserTrack(path));
     }
-    apply(&model, .show_songs);
     const seeded = try buildTree(arena, &model);
-    try testing.expectEqual(@as(usize, 8), countListItems(seeded.root));
+    try testing.expectEqual(@as(usize, 1), countListItems(seeded.root));
     try testing.expect(countWidgets(seeded.root) < 1024);
-}
-
-test "compact shell composes on a phone-sized surface" {
-    const live = try LiveApp.startSized(false, phone_size);
-    defer live.stop();
-    try live.dispatch(.{ .canvas_resized = phone_size.width });
-    try testing.expectEqual(model_mod.FormFactor.compact, live.app_state.model.formFactor());
-
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const tree = try buildTree(arena_state.allocator(), &live.app_state.model);
-    try testing.expect(findByLabel(tree.root, "Compact header") != null);
 }
 
 test "session round-trip restores now queue mode theme and volume" {
@@ -705,7 +638,7 @@ test "session round-trip restores now queue mode theme and volume" {
     model.now = a;
     model.elapsed_ms = 12345;
     model.playing = true;
-    model.play_mode = .shuffle;
+    model.play_mode = .list_loop;
     model.theme = .dark;
     model.volume = 0.4;
     model.queue_open = true;
@@ -721,7 +654,7 @@ test "session round-trip restores now queue mode theme and volume" {
     try testing.expect(restored.addUserTrack("/Music/a.mp3"));
     try testing.expect(restored.addUserTrack("/Music/b.mp3"));
     try testing.expect(restored.restoreSession(bytes));
-    try testing.expectEqual(model_mod.PlayMode.shuffle, restored.play_mode);
+    try testing.expectEqual(model_mod.PlayMode.list_loop, restored.play_mode);
     try testing.expectEqual(model_mod.ThemePreference.dark, restored.theme);
     try testing.expectApproxEqAbs(@as(f32, 0.4), restored.volume, 0.0001);
     try testing.expect(restored.queue_open);
@@ -730,6 +663,42 @@ test "session round-trip restores now queue mode theme and volume" {
     try testing.expectEqual(@as(?u8, a), restored.session_resume_track);
     try testing.expectEqual(@as(u32, 12345), restored.session_resume_elapsed_ms);
     try testing.expect(restored.session_resume_playing);
+}
+
+test "session resume restores volume and never auto-plays" {
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/Music/a.mp3"));
+    const a = model.user_tracks[0].id;
+    model.now = a;
+    model.elapsed_ms = 5000;
+    model.playing = true;
+    model.volume = 0.35;
+
+    var buffer: [model_mod.max_session_store_bytes]u8 = undefined;
+    const bytes = model.serializeSession(&buffer);
+
+    var restored: Model = .{};
+    try testing.expect(restored.addUserTrack("/Music/a.mp3"));
+
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    applyFx(&restored, .{ .session_done = .{
+        .key = model_mod.session_read_key,
+        .op = .read,
+        .outcome = .ok,
+        .bytes = bytes,
+    } }, &fx);
+
+    try testing.expectEqual(@as(?u8, a), restored.now);
+    try testing.expect(!restored.playing);
+    try testing.expectApproxEqAbs(@as(f32, 0.35), restored.volume, 0.0001);
+    try testing.expectEqual(@as(?u8, null), restored.session_resume_track);
+
+    // Volume rides the Msg payload — not the rebuild-time sync path that
+    // used to clobber a restored value with the previous slider thumb.
+    apply(&restored, .{ .volume_changed = 0.2 });
+    try testing.expectApproxEqAbs(@as(f32, 0.2), restored.volume, 0.0001);
 }
 
 test "play album fills the playlist with every track and list-loop wraps it" {
@@ -744,11 +713,16 @@ test "play album fills the playlist with every track and list-loop wraps it" {
 
     // Stale play-next entries from another context must be replaced.
     apply(&model, .{ .queue_track = a });
+    try testing.expect(model.queue_open);
+    // User closed the panel; Play Album must start playback without
+    // reopening it.
+    apply(&model, .toggle_queue);
+    try testing.expect(!model.queue_open);
     apply(&model, .{ .play_album = album_id });
 
     try testing.expectEqual(@as(?u8, a), model.now);
     try testing.expect(model.playing);
-    try testing.expect(model.queue_open);
+    try testing.expect(!model.queue_open);
     try testing.expectEqual(@as(usize, 3), model.queue_len);
     try testing.expectEqual(a, model.queue[0]);
     try testing.expectEqual(b, model.queue[1]);
@@ -811,106 +785,41 @@ test "media command keys map through onKey" {
     try testing.expectEqual(Msg{ .media_command = .previous }, prev.?);
 }
 
-test "scrubber timer starts on play and cancels on pause or audio failure" {
+fn audioPollPending(fx: *model_mod.Effects) bool {
+    var i: usize = 0;
+    while (i < fx.pendingTimerCount()) : (i += 1) {
+        const timer = fx.pendingTimerAt(i) orelse continue;
+        if (timer.key == model_mod.audio_poll_timer_key) return true;
+    }
+    return false;
+}
+
+test "audio poll timer arms while playing and cancels on pause" {
     var fx = model_mod.Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
 
     var model: Model = .{};
-    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/scrubber.mp3"));
+    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/poll.mp3"));
     const id = model.user_tracks[0].id;
 
     applyFx(&model, .{ .play_track = id }, &fx);
     try testing.expect(model.playing);
-    try testing.expect(scrubberTimerPending(&fx));
-    try testing.expectEqual(model_mod.scrubber_interval_ms, fx.pendingTimerAt(0).?.interval_ms);
+    try testing.expect(audioPollPending(&fx));
+    try testing.expectEqual(model_mod.audio_poll_interval_ms, fx.pendingTimerAt(0).?.interval_ms);
 
     applyFx(&model, .toggle_play, &fx);
     try testing.expect(!model.playing);
-    try testing.expect(!scrubberTimerPending(&fx));
-
-    applyFx(&model, .toggle_play, &fx);
-    try testing.expect(model.playing);
-    try testing.expect(scrubberTimerPending(&fx));
-
-    applyFx(&model, .{ .audio_event = .{ .key = id, .kind = .failed } }, &fx);
-    try testing.expectEqual(@as(?u8, null), model.now);
-    try testing.expect(!model.playing);
-    try testing.expect(!scrubberTimerPending(&fx));
+    try testing.expect(!audioPollPending(&fx));
 }
 
-test "scrubber tick advances elapsed_ms by the scrubber interval" {
-    var model: Model = .{};
-    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/scrubber.mp3"));
-    const id = model.user_tracks[0].id;
-    apply(&model, .{ .play_track = id });
-    try testing.expectEqual(@as(u32, 0), model.elapsed_ms);
-
-    apply(&model, .{ .scrubber_tick = .{
-        .key = model_mod.scrubber_timer_key,
-        .timestamp_ns = 0,
-        .outcome = .fired,
-    } });
-    try testing.expectEqual(@as(u32, model_mod.scrubber_interval_ms), model.elapsed_ms);
-}
-
-test "scrubber timer arming does not leak across Model instances" {
-    var fx_a = model_mod.Effects.init(testing.allocator);
-    defer fx_a.deinit();
-    fx_a.executor = .fake;
-    var model_a: Model = .{};
-    try testing.expect(model_a.addUserTrack("/tmp/wellmusic-test/a.mp3"));
-    applyFx(&model_a, .{ .play_track = model_a.user_tracks[0].id }, &fx_a);
-    try testing.expect(scrubberTimerPending(&fx_a));
-
-    // Fresh Model + Effects must still arm — a module-level armed flag
-    // left true by model_a would skip startTimer here.
-    var fx_b = model_mod.Effects.init(testing.allocator);
-    defer fx_b.deinit();
-    fx_b.executor = .fake;
-    var model_b: Model = .{};
-    try testing.expect(model_b.addUserTrack("/tmp/wellmusic-test/b.mp3"));
-    applyFx(&model_b, .{ .play_track = model_b.user_tracks[0].id }, &fx_b);
-    try testing.expect(scrubberTimerPending(&fx_b));
-}
-
-test "scrubber timer reject degrades for the session and retries after pause" {
-    var fx = model_mod.Effects.init(testing.allocator);
-    defer fx.deinit();
-    fx.executor = .fake;
-
-    var model: Model = .{};
-    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/scrubber.mp3"));
-    const id = model.user_tracks[0].id;
-
-    applyFx(&model, .{ .play_track = id }, &fx);
-    try testing.expect(scrubberTimerPending(&fx));
-    try testing.expect(model.scrubber_timer_armed);
-    try testing.expect(!model.scrubber_degraded);
-
-    applyFx(&model, .{ .scrubber_tick = .{
-        .key = model_mod.scrubber_timer_key,
-        .timestamp_ns = 0,
-        .outcome = .rejected,
-    } }, &fx);
-    try testing.expect(!model.scrubber_timer_armed);
-    try testing.expect(model.scrubber_degraded);
-    // Reject means no live timer; clear any pre-reject fake slot so a
-    // silent re-arm would be visible as a new pending timer.
-    fx.cancelTimer(model_mod.scrubber_timer_key);
-    try testing.expect(!scrubberTimerPending(&fx));
-
-    applyFx(&model, .toggle_library_view, &fx);
-    try testing.expect(model.playing);
-    try testing.expect(model.scrubber_degraded);
-    try testing.expect(!model.scrubber_timer_armed);
-    try testing.expect(!scrubberTimerPending(&fx));
-
-    applyFx(&model, .toggle_play, &fx);
-    try testing.expect(!model.playing);
-    try testing.expect(!model.scrubber_degraded);
-    applyFx(&model, .toggle_play, &fx);
-    try testing.expect(model.playing);
-    try testing.expect(model.scrubber_timer_armed);
-    try testing.expect(scrubberTimerPending(&fx));
+test "track enter motion stays off while paused so session restore cannot arm the frame loop" {
+    // Paused with elapsed still inside the motion window is the session-
+    // restore shape: without the playing gate, every rebuild re-bases
+    // start_ns and the Metal frame channel never settles.
+    try testing.expect(!main.trackEnterMotionActive(false, 0));
+    try testing.expect(!main.trackEnterMotionActive(false, 100));
+    try testing.expect(main.trackEnterMotionActive(true, 0));
+    try testing.expect(main.trackEnterMotionActive(true, 420));
+    try testing.expect(!main.trackEnterMotionActive(true, 421));
 }
