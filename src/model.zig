@@ -19,6 +19,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const metadata = @import("metadata.zig");
+const media_session = @import("media_session.zig");
 
 const canvas = native_sdk.canvas;
 
@@ -73,9 +74,10 @@ pub const max_cover_file_bytes: usize = 32 * 1024 * 1024;
 /// Longest edge accepted from the platform decoder before we refuse.
 /// 4096² RGBA ≈ 64 MiB temporary decode scratch.
 pub const max_cover_decode_edge: usize = 4096;
-/// Longest edge registered into the canvas image slot. Matches the SDK
-/// `max_registered_canvas_image_pixel_bytes` avatar/icon budget (512²).
-pub const max_cover_register_edge: usize = 512;
+/// Longest edge registered into the canvas image slot. Half the SDK
+/// 512² avatar budget: album tiles and the 52pt now-playing cover do
+/// not need full-res pixels, and 256² cuts texture RSS ~4×.
+pub const max_cover_register_edge: usize = 256;
 pub const library_store_header_v1 = "wellmusic-library v1";
 pub const library_store_header_v2 = "wellmusic-library v2";
 pub const library_store_header = "wellmusic-library v3";
@@ -307,11 +309,13 @@ const position_snap_slack_ms: u32 = 1200;
 /// Playback-state poll while playing. The platform emits `.spectrum`
 /// (~25 Hz) alongside position when `on_event` is set; WellMusic draws no
 /// analyzer. So `playAudio` intentionally omits `on_event`, and this
-/// timer (~1 Hz) mirrors position / completion / failure from
-/// `fx.audioSnapshot()` instead. No seek scrubber means sub-second UI
-/// updates buy nothing; 1 Hz still catches natural end within a beat.
+/// timer (every ~2 s) mirrors position / completion / failure from
+/// `fx.audioSnapshot()` instead. No seek scrubber and no elapsed label
+/// means UiApp's mandatory rebuild-on-Msg is pure overhead for steady
+/// ticks — 2 s still catches natural end quickly, and Now Playing is
+/// updated inside the poll (content-throttled) without waiting on view.
 pub const audio_poll_timer_key: u64 = 43;
-pub const audio_poll_interval_ms: u64 = 1000;
+pub const audio_poll_interval_ms: u64 = 2000;
 
 pub const Msg = union(enum) {
     /// Header: cycle the app theme light ↔ dark (locks off
@@ -358,7 +362,7 @@ pub const Msg = union(enum) {
     /// coarse position ticks. Journal/test path only — the live app has
     /// no seek scrubber and does not arm a playback timer.
     frame_clock: FrameClock,
-    /// ~1 Hz mirror of `fx.audioSnapshot()` while a track is loaded.
+    /// ~2 s mirror of `fx.audioSnapshot()` while a track is loaded.
     /// Replaces platform `on_event` delivery so ~25 Hz spectrum reports
     /// never enter the TEA loop (see `audio_poll_timer_key`).
     audio_poll: native_sdk.EffectTimer,
@@ -413,9 +417,13 @@ pub const Msg = union(enum) {
     close_edit_album,
     /// Album / cover menu: pick a new cover image for this album.
     change_cover: u8,
-    /// First presented frame: migrate paths, heal titles, load covers.
-    /// Armed once at launch after sync library restore; never persisted.
+    /// First presented frame: migrate paths and heal titles. Covers then
+    /// load one album per subsequent present (`cover_hydrate`). Armed
+    /// once at launch after sync library restore; never persisted.
     library_hydrate,
+    /// One album cover decode after `library_hydrate` (or after import).
+    /// Spread across presents so first paint stays light.
+    cover_hydrate,
     /// Persist library writes (reads are sync at launch via `loadLibrarySync`).
     library_done: native_sdk.EffectFileResult,
     /// Persist / restore playback session (now, queue, mode, volume).
@@ -439,7 +447,7 @@ pub const Msg = union(enum) {
         "edit_album",     "edit_title",     "edit_artist",
         "save_edit_track", "close_edit_track",
         "save_edit_album", "close_edit_album", "change_cover",
-        "library_hydrate",
+        "library_hydrate", "cover_hydrate",
         "library_done",   "cover_done",     "volume_changed",
         "toggle_queue",   "remove_queued",  "clear_queue",
         "media_command",
@@ -485,9 +493,9 @@ pub const Model = struct {
     /// current row), but selecting never plays.
     selected: ?u8 = null,
     playing: bool = false,
-    /// Playback clock for session restore, Now Playing, and the track-
-    /// enter motion window. Advanced by player position ticks (and the
-    /// journal-only `frame_clock` path); there is no live scrubber timer.
+    /// Playback clock for session restore and Now Playing. Advanced by
+    /// player position ticks (and the journal-only `frame_clock` path);
+    /// there is no live scrubber and the view does not bind this field.
     elapsed_ms: u32 = 0,
     /// The last `frame_clock` timestamp, the delta base for the rendered
     /// clock. Never reset: a stale gap (pause, occlusion, boot) is
@@ -568,9 +576,13 @@ pub const Model = struct {
     /// replaces the binding). Avoids decoding the last track at launch.
     audio_deferred: bool = false,
     /// Armed at launch after sync library restore; first frame clears it
-    /// via `library_hydrate` so migrate / title heal / covers never block
-    /// the initial present.
+    /// via `library_hydrate` so migrate / title heal never block the
+    /// initial present. Cover loads follow via `cover_hydrate_pending`.
     library_hydrate_pending: bool = false,
+    /// After hydrate (or import), decode one cover per present until
+    /// every album with a path has been tried.
+    cover_hydrate_pending: bool = false,
+    cover_hydrate_index: usize = 0,
 
     /// Read by the ZIG-BUILT views (grid, detail, track rows), update
     /// logic, or main's launch wiring — never bound in markup — so
@@ -605,6 +617,7 @@ pub const Model = struct {
         "session_resume_playing",
         "audio_deferred",
         "library_hydrate_pending",
+        "cover_hydrate_pending", "cover_hydrate_index",
         "save_pending",
         "storePath",       "sessionPath",    "mediaDir",
         "editTitle",
@@ -1557,13 +1570,42 @@ pub fn bootSession(model: *Model, fx: *Effects) void {
     requestSessionLoad(model, fx);
 }
 
-/// Post-first-frame library work: migrate external media, heal titles from
-/// on-disk tags, then load covers. Safe with an empty library.
+/// Post-first-frame library work: migrate external media and heal titles
+/// from on-disk tags. Cover decode is staggered via `armCoverHydrate` so
+/// the first present stays cheap. Safe with an empty library.
 pub fn hydrateLibrary(model: *Model, fx: *Effects) void {
     var changed = migrateExternalMedia(model);
     if (model.refreshTitlesFromMedia()) changed = true;
     if (changed) persistLibrary(model, fx);
-    requestAllCoverLoads(model, fx);
+    armCoverHydrate(model);
+    // Session-restored now-playing cover should appear with the transport
+    // on the first trickle, not after every other album.
+    if (model.nowTrack()) |track| {
+        requestCoverLoad(model, fx, track.album);
+    }
+}
+
+/// Queue a one-cover-per-present walk of albums that still have a path
+/// but no registered image (or need a refresh after import).
+pub fn armCoverHydrate(model: *Model) void {
+    model.cover_hydrate_index = 0;
+    model.cover_hydrate_pending = model.user_album_count > 0;
+}
+
+/// Decode the next album cover; clears the pending flag when done.
+fn hydrateNextCover(model: *Model, fx: *Effects) void {
+    while (model.cover_hydrate_index < model.user_album_count) {
+        const album = &model.user_albums[model.cover_hydrate_index];
+        model.cover_hydrate_index += 1;
+        if (album.cover_path_len == 0) continue;
+        if (album.cover != 0) continue;
+        requestCoverLoad(model, fx, album.id);
+        if (model.cover_hydrate_index >= model.user_album_count) {
+            model.cover_hydrate_pending = false;
+        }
+        return;
+    }
+    model.cover_hydrate_pending = false;
 }
 
 pub fn persistSession(model: *Model, fx: *Effects) void {
@@ -1889,9 +1931,59 @@ fn requestCoverLoad(model: *Model, fx: *Effects, album_id: u8) void {
     _ = loadCoverFromPath(model, fx, album_id);
 }
 
-fn requestAllCoverLoads(model: *Model, fx: *Effects) void {
+/// True when any catalog string needs a CJK-capable face. Used at boot
+/// to skip the ~7 MiB system face for Latin-only libraries. Late imports
+/// cannot register a font after the installing frame — relaunch picks
+/// them up.
+pub fn libraryNeedsCjkFont(model: *const Model) bool {
     for (model.user_albums[0..model.user_album_count]) |*album| {
-        if (album.cover_path_len > 0) requestCoverLoad(model, fx, album.id);
+        if (textHasCjk(album.title())) return true;
+        if (textHasCjk(album.artist())) return true;
+    }
+    for (model.user_tracks[0..model.user_track_count]) |*track| {
+        if (textHasCjk(track.title())) return true;
+        if (textHasCjk(track.artist())) return true;
+    }
+    return false;
+}
+
+fn textHasCjk(bytes: []const u8) bool {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > bytes.len) break;
+        const cp = std.unicode.utf8Decode(bytes[i..][0..seq_len]) catch {
+            i += 1;
+            continue;
+        };
+        if (codepointNeedsCjkFont(cp)) return true;
+        i += seq_len;
+    }
+    return false;
+}
+
+fn codepointNeedsCjkFont(cp: u21) bool {
+    return (cp >= 0x3040 and cp <= 0x30FF) // Hiragana + Katakana
+    or (cp >= 0x3400 and cp <= 0x4DBF) // CJK Extension A
+    or (cp >= 0x4E00 and cp <= 0x9FFF) // CJK Unified
+    or (cp >= 0xAC00 and cp <= 0xD7AF) // Hangul syllables
+    or (cp >= 0xF900 and cp <= 0xFAFF); // CJK Compatibility Ideographs
+}
+
+/// Push Control Center / Now Playing from model state. Content-throttled
+/// inside `media_session`; safe to call on every poll tick.
+fn syncNowPlaying(model: *const Model) void {
+    if (model.nowTrack()) |track| {
+        const artist = if (track.artist.len > 0) track.artist else blk: {
+            const album = model.userAlbumById(track.album);
+            break :blk if (album) |a| a.artist() else "";
+        };
+        media_session.publish(track.title, artist, model.now_duration_ms, model.elapsed_ms, model.playing);
+    } else {
+        media_session.clear();
     }
 }
 
@@ -1929,6 +2021,8 @@ fn applySessionResume(model: *Model, fx: *Effects) void {
     // Defer playAudio/seek until the user presses play — cold launch
     // should not decode the last track just to show the transport.
     model.audio_deferred = true;
+    requestCoverLoad(model, fx, track.album);
+    syncNowPlaying(model);
     syncAudioPollTimer(model, fx);
 }
 
@@ -1969,6 +2063,7 @@ fn engageDeferredAudio(model: *Model, fx: *Effects, play: bool) void {
         fx.pauseAudio();
     }
     syncAudioPollTimer(model, fx);
+    syncNowPlaying(model);
     persistSession(model, fx);
 }
 
@@ -2169,6 +2264,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.open_album = id;
             // A fresh record opens at its top.
             model.detail_scroll = 0;
+            // Detail cover should not wait on the staggered hydrate walk.
+            requestCoverLoad(model, fx, id);
         },
         .close_album => model.open_album = null,
         .play_album => |id| {
@@ -2263,7 +2360,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const was_playing = model.now == id;
             if (!model.removeUserTrack(id)) return;
             if (model.editing_track == id) model.cancelEditTrack();
-            if (was_playing) fx.stopAudio();
+            if (was_playing) {
+                fx.stopAudio();
+                // Publish moved out of animations — clear Control Center
+                // when the loaded track disappears.
+                syncNowPlaying(model);
+                persistSession(model, fx);
+            }
             persistLibrary(model, fx);
         },
         .edit_track => |id| {
@@ -2290,6 +2393,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (!model.library_hydrate_pending) return;
             model.library_hydrate_pending = false;
             hydrateLibrary(model, fx);
+        },
+        .cover_hydrate => {
+            if (!model.cover_hydrate_pending) return;
+            hydrateNextCover(model, fx);
         },
         .library_done => |result| switch (result.op) {
             // Launch loads the library sync; async reads are unused.
@@ -2382,6 +2489,7 @@ fn handleAudioEvent(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) 
             model.elapsed_ms = 0;
             model.now_duration_ms = 0;
             model.platform_duration_ms = 0;
+            syncNowPlaying(model);
             persistSession(model, fx);
         },
     }
@@ -2468,7 +2576,7 @@ fn moveSelection(model: *Model, step: SelectionStep) void {
     if (target) |id| model.selected = id;
 }
 
-/// Arm or disarm the ~1 Hz audio poll while actually playing.
+/// Arm or disarm the ~2 s audio poll while actually playing.
 /// Paused / idle stay quiet. Idempotent edge transitions only
 /// (re-arming every update starves fires).
 fn syncAudioPollTimer(model: *Model, fx: *Effects) void {
@@ -2489,10 +2597,17 @@ fn syncAudioPollTimer(model: *Model, fx: *Effects) void {
 
 /// Mirror the platform player into the model without riding `on_event`
 /// (which would also deliver ~25 Hz spectrum reports into TEA).
-/// Platform events still update the effects-channel mirrors; this only
-/// copies them into Model at poll cadence.
+///
+/// UiApp rebuilds on every Msg, and the view does not bind `elapsed_ms`,
+/// so steady-state ticks are overhead. Keep mutations to completion /
+/// failure / first duration adoption (those change visible UI); always
+/// refresh Now Playing here (content-throttled) so Control Center does
+/// not depend on a view rebuild.
 fn pollAudioChannel(model: *Model, fx: *Effects) void {
-    const now_id = model.now orelse return;
+    const now_id = model.now orelse {
+        syncNowPlaying(model);
+        return;
+    };
     if (model.audio_deferred) return;
     const snap = fx.audioSnapshot();
     if (snap.active and snap.key != now_id) return;
@@ -2505,6 +2620,7 @@ fn pollAudioChannel(model: *Model, fx: *Effects) void {
         model.elapsed_ms = 0;
         model.now_duration_ms = 0;
         model.platform_duration_ms = 0;
+        syncNowPlaying(model);
         persistSession(model, fx);
         return;
     }
@@ -2517,10 +2633,13 @@ fn pollAudioChannel(model: *Model, fx: *Effects) void {
     // never takes this branch.
     if (model.playing and !snap.playing) {
         model.elapsed_ms = if (model.now_duration_ms > 0) model.now_duration_ms else position;
+        syncNowPlaying(model);
         onTrackCompleted(model, fx);
         return;
     }
 
+    // Position is session/Now Playing only — no view binding. Skip the
+    // write when nothing moved so identical rebuilds stay cheap.
     if (model.playing) {
         if (position > model.elapsed_ms or model.elapsed_ms - position > position_snap_slack_ms) {
             model.elapsed_ms = position;
@@ -2528,6 +2647,7 @@ fn pollAudioChannel(model: *Model, fx: *Effects) void {
     } else {
         model.elapsed_ms = position;
     }
+    syncNowPlaying(model);
 }
 
 /// Journal/test path: advance the rendered clock by the real frame
@@ -2554,10 +2674,8 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     // Starting a track selects it: the playing row is the current row
     // for the arrow keys and the inverted accent register alike.
     model.selected = track_id;
-    // `elapsed_ms` restarts here and advances with frame-clock messages
-    // corrected by position events — it is also the motion clock for
-    // the now-playing slide-in window, so animation gating replays
-    // deterministically (no live clock read anywhere).
+    // `elapsed_ms` restarts here and advances with position ticks /
+    // journal `frame_clock` — session restore and Now Playing only.
     model.elapsed_ms = 0;
     // The manifest's measured duration is the total for the whole
     // playback — the same number the track lists render, so the two
@@ -2571,6 +2689,8 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     model.assets_missing = false;
     model.playing = true;
     model.audio_deferred = false;
+    // Now-playing cover should not wait on the staggered hydrate walk.
+    requestCoverLoad(model, fx, track.album);
     // Imported tracks are local paths. If a file was moved or deleted,
     // fail before asking the host — and
     // persist so session resume does not keep retrying a dead path.
@@ -2583,6 +2703,7 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
         model.elapsed_ms = 0;
         model.now_duration_ms = 0;
         model.platform_duration_ms = 0;
+        syncNowPlaying(model);
         persistSession(model, fx);
         return;
     }
@@ -2596,6 +2717,7 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
         .path = track.path,
     });
     fx.setAudioVolume(model.volume);
+    syncNowPlaying(model);
     persistSession(model, fx);
 }
 
@@ -2629,6 +2751,7 @@ fn setPlaying(model: *Model, fx: *Effects, playing: bool) void {
     } else {
         fx.pauseAudio();
     }
+    syncNowPlaying(model);
     persistSession(model, fx);
 }
 
@@ -2695,6 +2818,9 @@ fn advanceWithinPlaylist(model: *Model, fx: *Effects, idx: usize, from_completio
 fn stopAtEnd(model: *Model) void {
     model.playing = false;
     if (model.now_duration_ms > 0) model.elapsed_ms = model.now_duration_ms;
+    // Poll already published while `playing` was still true; republish
+    // paused state so Control Center does not keep advancing.
+    syncNowPlaying(model);
 }
 
 /// Restart the current track when it is a few seconds in; otherwise the
@@ -2705,12 +2831,14 @@ fn previous(model: *Model, fx: *Effects) void {
     if (model.elapsed_ms > 3000) {
         model.elapsed_ms = 0;
         fx.seekAudio(0);
+        syncNowPlaying(model);
         return;
     }
     if (model.queueIndexOf(track.id)) |idx| {
         if (model.play_mode == .sequential and idx == 0) {
             model.elapsed_ms = 0;
             fx.seekAudio(0);
+            syncNowPlaying(model);
             return;
         }
         const len = model.queue_len;
@@ -2724,6 +2852,7 @@ fn previous(model: *Model, fx: *Effects) void {
     if (model.play_mode == .sequential and track.number <= 1) {
         model.elapsed_ms = 0;
         fx.seekAudio(0);
+        syncNowPlaying(model);
         return;
     }
     const prev_number: u8 = @intCast((@as(usize, track.number) + count - 2) % count + 1);

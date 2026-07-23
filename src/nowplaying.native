@@ -1,10 +1,11 @@
 <!-- The now-playing transport bar. The rounded-square cover is the one
      image binding markup carries (the avatar's u64 ImageId). Playback is
      REAL audio through the runtime audio effect family — see model.zig.
-     No seek scrubber: a progress bar would force ~20 Hz full-tree
-     rebuilds while playing. The title/artist lines double as the status
-     surface: a failed load swaps in the assets-not-prepared notice so
-     the user knows to run the prepare script.
+     No seek scrubber: a progress bar would force frequent full-tree
+     rebuilds while playing. Playback state is mirrored ~every 2s via
+     `audio_poll`; Now Playing metadata updates inside that poll. The
+     title/artist lines double as the status surface: a failed load swaps
+     in the assets-not-prepared notice so the user knows what failed.
 
      Three equal-balance zones (Apple Music / Spotify convention):
        leading  — cover + title/artist

@@ -115,7 +115,15 @@ var ui_font_reg_count: usize = 0;
 var ui_font_bytes_released: bool = false;
 var media_session_warmed: bool = false;
 
-fn prepareUiFonts() void {
+/// Register a CJK-capable face only when the catalog needs it. Fonts
+/// install exactly once on the installing frame — a later CJK import in
+/// a Latin-only session stays tofu until relaunch (SDK has no late
+/// `registerFont`). Empty libraries skip the ~7 MiB face entirely.
+fn prepareUiFontsIfNeeded(model: *const Model) void {
+    if (!model_mod.libraryNeedsCjkFont(model)) {
+        ui_font_reg_count = 0;
+        return;
+    }
     ui_font.load(std.heap.page_allocator);
     if (!ui_font.ready()) {
         ui_font_reg_count = 0;
@@ -144,7 +152,6 @@ pub fn wellMusicOptions() WellMusicApp.Options {
         .on_command = onCommand,
         .on_key = onKey,
         .on_frame = onFrame,
-        .animations = animations,
         .status_item = .{
             .title = "♪",
             .tooltip = "WellMusic",
@@ -243,9 +250,9 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 }
 
 /// The per-frame hook carries the album grid's width channel only.
-/// There is no seek scrubber and no playback timer, so idle / paused /
-/// playing apps present only on real UI changes (and short track-enter
-/// animations) instead of locking the Metal surface to a clock.
+/// There is no seek scrubber and no track-enter motion, so idle /
+/// paused / playing apps present only on real UI changes instead of
+/// locking the Metal surface to a clock.
 ///
 /// A WIDTH CHANGE (live resize, fullscreen) dispatches into the model
 /// so the grid re-derives its column count on the very next rebuild.
@@ -267,11 +274,11 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 /// may still hold a dangling slice, but the SDK never re-reads it.
 ///
 /// The same first present also arms `library_hydrate` when launch set
-/// `library_hydrate_pending`: migrate / titles / covers stay off the
-/// critical path that paints the album grid. MediaPlayer/objc symbols
-/// warm here too so the first now-playing publish does not hitch on
-/// `dlopen` — kept out of `model` so the domain layer stays free of
-/// the platform bridge.
+/// `library_hydrate_pending`: migrate / titles stay off the critical
+/// path that paints the album grid. Cover bytes then trickle in one
+/// album per present (`cover_hydrate`) so a large library does not
+/// decode every image before first paint. MediaPlayer/objc symbols warm
+/// here too so the first now-playing publish does not hitch on `dlopen`.
 pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     if (!ui_font_bytes_released) {
         ui_font_bytes_released = true;
@@ -284,90 +291,11 @@ pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     if (model.library_hydrate_pending) {
         return .library_hydrate;
     }
+    if (model.cover_hydrate_pending) {
+        return .cover_hydrate;
+    }
     if (frame.size.width != model.canvas_width) {
         return Msg{ .canvas_resized = frame.size.width };
-    }
-    return null;
-}
-
-// ------------------------------------------------------------- animations
-
-/// Track-change enter: title and cover fade/slide in on a critically
-/// damped spring (theme motion), gated on the PLAYBACK clock
-/// (`elapsed_ms` restarts per track) AND on `playing`. Split + stagger —
-/// title leads, cover follows ~80 ms later — so chunks move independently
-/// instead of one container. Translate is small (8pt): enough to telegraph
-/// arrival without a theatrical drop. Window matches the theme's slow
-/// settle (~340 ms) plus stagger headroom. Reduce-motion zeroes durations
-/// through the theme; the same Msg sequence replays the same set.
-///
-/// `playing` is required: UiApp re-bases `start_ns` to the latest frame
-/// timestamp on every rebuild. A paused (or session-restored) track with
-/// `elapsed_ms` still inside the window would otherwise re-arm the Metal
-/// frame channel forever — audio position ticks keep rebuilding, the
-/// spring never expires, and CPU pegs while edit/cover UI starves.
-const motion_window_ms: u32 = 420;
-/// Stagger between title and cover enter animations (nanoseconds).
-const cover_stagger_ns: u64 = 80_000_000;
-
-/// Whether the now-playing enter motion should still be declared. Pure
-/// so tests can pin the pause/session-restore latch without a full tree.
-pub fn trackEnterMotionActive(playing: bool, elapsed_ms: u32) bool {
-    return playing and elapsed_ms <= motion_window_ms;
-}
-
-pub fn animations(model: *const Model, tree: *const WellMusicApp.Ui.Tree, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize {
-    // Keep Control Center / Now Playing in sync with the model. Cheap
-    // and only runs on rebuilds that already happened.
-    if (model.nowTrack()) |track| {
-        const artist = if (track.artist.len > 0) track.artist else blk: {
-            const album = model.userAlbumById(track.album);
-            break :blk if (album) |a| a.artist() else "";
-        };
-        media_session.publish(track.title, artist, model.now_duration_ms, model.elapsed_ms, model.playing);
-    } else {
-        media_session.clear();
-    }
-    if (model.now == null) return 0;
-    if (!trackEnterMotionActive(model.playing, model.elapsed_ms)) return 0;
-    const motion = tokensFromModel(model).motion;
-
-    var count: usize = 0;
-    if (findByLabel(tree.root, "Now playing title")) |title| {
-        count += slideIn(motion, title.id, text_slot, start_ns, out[count..]);
-    }
-    if (findByLabel(tree.root, "Now playing cover")) |cover| {
-        const cover_start = start_ns +% cover_stagger_ns;
-        count += slideIn(motion, cover.id, fill_slot, cover_start, out[count..]);
-        count += slideIn(motion, cover.id, image_slot, cover_start, out[count..]);
-    }
-    return count;
-}
-
-// Widget display-list part slots (`canvas.widgetCommandPartId`).
-const fill_slot: canvas.ObjectId = 1;
-const image_slot: canvas.ObjectId = 3;
-const text_slot: canvas.ObjectId = 4;
-
-fn slideIn(motion: anytype, widget_id: canvas.ObjectId, slot: canvas.ObjectId, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize {
-    if (out.len == 0) return 0;
-    out[0] = motion.animation(.{
-        .id = canvas.widgetCommandPartId(.{ .widget_id = widget_id, .slot = slot }),
-        .start_ns = start_ns,
-        .duration = .slow,
-        .easing = .spring,
-        .from_opacity = 0,
-        .to_opacity = 1,
-        .from_transform = canvas.Affine.translate(0, 8),
-        .to_transform = canvas.Affine.identity(),
-    });
-    return 1;
-}
-
-fn findByLabel(widget: canvas.Widget, label: []const u8) ?canvas.Widget {
-    if (std.mem.eql(u8, widget.semantics.label, label)) return widget;
-    for (widget.children) |child| {
-        if (findByLabel(child, label)) |found| return found;
     }
     return null;
 }
@@ -385,7 +313,6 @@ pub fn onCommand(name: []const u8) ?Msg {
 
 pub fn main(init: std.process.Init) !void {
     registerIcons();
-    prepareUiFonts();
     var model: Model = .{};
     var data_dir_buffer: [model_mod.max_store_path]u8 = undefined;
     var store_file_buffer: [model_mod.max_store_path]u8 = undefined;
@@ -424,6 +351,9 @@ pub fn main(init: std.process.Init) !void {
     // Restore before UiApp.init so the first painted frame already has
     // the catalog — avoids the empty-library flash of an async read.
     model_mod.loadLibrarySync(&model);
+    // Fonts register on the installing frame only; decide from the
+    // restored catalog so Latin-only libraries skip the CJK face RSS.
+    prepareUiFontsIfNeeded(&model);
     // Covers / migrate / title heal run after the first present.
     model.library_hydrate_pending = true;
     const app_state = try std.heap.page_allocator.create(WellMusicApp);

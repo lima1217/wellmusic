@@ -286,8 +286,15 @@ test "first frame hydrates library after album grid can paint" {
 
     apply(&model, msg.?);
     try testing.expect(!model.library_hydrate_pending);
+    try testing.expect(model.cover_hydrate_pending);
 
-    // A second frame must not re-arm hydrate (resize / idle only).
+    // Covers trickle one present later; albums without paths clear in one tick.
+    const cover_msg = main.onFrame(&model, frame);
+    try testing.expect(cover_msg != null);
+    try testing.expect(cover_msg.? == .cover_hydrate);
+    apply(&model, cover_msg.?);
+    try testing.expect(!model.cover_hydrate_pending);
+
     const again = main.onFrame(&model, frame);
     try testing.expect(again == null);
 }
@@ -985,27 +992,50 @@ test "audio poll timer arms while playing and cancels on pause" {
     try testing.expect(model.playing);
     try testing.expect(audioPollPending(&fx));
     try testing.expectEqual(model_mod.audio_poll_interval_ms, fx.pendingTimerAt(0).?.interval_ms);
+    try testing.expectEqual(@as(u64, 2000), model_mod.audio_poll_interval_ms);
 
     applyFx(&model, .toggle_play, &fx);
     try testing.expect(!model.playing);
     try testing.expect(!audioPollPending(&fx));
 }
 
-test "track enter motion stays off while paused so session restore cannot arm the frame loop" {
-    // Paused with elapsed still inside the motion window is the session-
-    // restore shape: without the playing gate, every rebuild re-bases
-    // start_ns and the Metal frame channel never settles.
-    try testing.expect(!main.trackEnterMotionActive(false, 0));
-    try testing.expect(!main.trackEnterMotionActive(false, 100));
-    try testing.expect(main.trackEnterMotionActive(true, 0));
-    try testing.expect(main.trackEnterMotionActive(true, 420));
-    try testing.expect(!main.trackEnterMotionActive(true, 421));
+test "libraryNeedsCjkFont detects CJK catalog text" {
+    var model: Model = .{};
+    try testing.expect(!model_mod.libraryNeedsCjkFont(&model));
+    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/latin.mp3"));
+    try testing.expect(!model_mod.libraryNeedsCjkFont(&model));
+    model.user_tracks[0].setTitle("夜曲");
+    try testing.expect(model_mod.libraryNeedsCjkFont(&model));
+}
+
+test "cover hydrate loads one unresolved album cover per tick" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    var model: Model = .{};
+    const a = model.addUserAlbum("A", "Artist") orelse unreachable;
+    const b = model.addUserAlbum("B", "Artist") orelse unreachable;
+    if (model.userAlbumByIdMut(a)) |album| album.setCoverPath("/tmp/wellmusic-cover-a.png");
+    if (model.userAlbumByIdMut(b)) |album| album.setCoverPath("/tmp/wellmusic-cover-b.png");
+
+    model_mod.armCoverHydrate(&model);
+    try testing.expect(model.cover_hydrate_pending);
+    try testing.expectEqual(@as(usize, 0), model.cover_hydrate_index);
+
+    applyFx(&model, .cover_hydrate, &fx);
+    try testing.expect(model.cover_hydrate_pending);
+    try testing.expectEqual(@as(usize, 1), model.cover_hydrate_index);
+
+    applyFx(&model, .cover_hydrate, &fx);
+    try testing.expect(!model.cover_hydrate_pending);
+    try testing.expectEqual(@as(usize, 2), model.cover_hydrate_index);
 }
 
 test "oversized cover downscales into the canvas image slot" {
-    // Phone photos and typical album art exceed the SDK's 512×512 RGBA
-    // registerImageBytes budget; loadCoverFromPath must decode with a
-    // larger scratch, shrink, then registerImage.
+    // Phone photos and typical album art exceed the registered edge;
+    // loadCoverFromPath must decode with a larger scratch, shrink, then
+    // registerImage into the 256pt canvas budget.
     var live = try LiveApp.start(true);
     defer live.stop();
 

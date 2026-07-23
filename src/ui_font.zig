@@ -12,6 +12,10 @@
 //! is missing or over outline budget. The app package stays small; only
 //! the process RSS grows by the chosen face size.
 //!
+//! Boot skips registration when the restored library has no CJK text
+//! (`libraryNeedsCjkFont`). Fonts install exactly once on the installing
+//! frame — a first CJK import in a Latin-only session needs relaunch.
+//!
 //! Candidate paths are macOS-only. Other targets need their own paths
 //! or a bundled face.
 
