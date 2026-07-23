@@ -111,6 +111,14 @@ pub fn publish(title: []const u8, artist: []const u8, duration_ms: u32, elapsed_
     last_publish = PublishCache.remember(title_hash, artist_hash, duration_ms, playing, elapsed_s);
 }
 
+/// Prefetch objc / MediaPlayer symbols after first paint so the first
+/// real `publish` does not hitch on `dlopen`. Safe to call repeatedly.
+pub fn warm() void {
+    if (comptime builtin.os.tag != .macos) return;
+    if (comptime builtin.is_test) return;
+    ensureInstalled();
+}
+
 pub fn clear() void {
     if (comptime builtin.os.tag != .macos) return;
     if (comptime builtin.is_test) return;

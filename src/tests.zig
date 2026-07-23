@@ -241,6 +241,57 @@ test "empty library shows the add-music empty state" {
     try testing.expectEqual(@as(usize, 0), countListItems(tree.root));
 }
 
+test "sync library load paints albums before first frame" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var seeded: Model = .{};
+    try testing.expect(seeded.addUserTrack("/Music/Alpha/Song One.mp3"));
+    var store_buf: [model_mod.max_library_store_bytes]u8 = undefined;
+    const bytes = seeded.serializeLibrary(&store_buf);
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const store_path = "/tmp/wellmusic-sync-library-load.txt";
+    {
+        var file = try std.Io.Dir.createFileAbsolute(io, store_path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, bytes);
+    }
+    defer std.Io.Dir.deleteFileAbsolute(io, store_path) catch {};
+
+    var model: Model = .{};
+    model.setStorePath(store_path);
+    model_mod.loadLibrarySync(&model);
+    try testing.expectEqual(@as(usize, 1), model.user_album_count);
+    try testing.expectEqual(@as(usize, 1), model.user_track_count);
+
+    const tree = try buildTree(arena_state.allocator(), &model);
+    try testing.expect(findByLabel(tree.root, "Empty library") == null);
+    try testing.expect(findByText(tree.root, .text, "Library") != null);
+}
+
+test "first frame hydrates library after album grid can paint" {
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/Music/Alpha/Song One.mp3"));
+    model.library_hydrate_pending = true;
+
+    const frame = native_sdk.platform.GpuFrame{
+        .size = geometry.SizeF.init(model.canvas_width, 720),
+    };
+    const msg = main.onFrame(&model, frame);
+    try testing.expect(msg != null);
+    try testing.expect(msg.? == .library_hydrate);
+
+    apply(&model, msg.?);
+    try testing.expect(!model.library_hydrate_pending);
+
+    // A second frame must not re-arm hydrate (resize / idle only).
+    const again = main.onFrame(&model, frame);
+    try testing.expect(again == null);
+}
+
 test "header overflow consolidates add and theme actions" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -782,13 +833,50 @@ test "session resume restores volume and never auto-plays" {
 
     try testing.expectEqual(@as(?u8, a), restored.now);
     try testing.expect(!restored.playing);
+    try testing.expect(restored.audio_deferred);
+    try testing.expectEqual(@as(u32, 5000), restored.elapsed_ms);
     try testing.expectApproxEqAbs(@as(f32, 0.35), restored.volume, 0.0001);
     try testing.expectEqual(@as(?u8, null), restored.session_resume_track);
+    // Cold launch must not decode audio just to paint the transport.
+    try testing.expect(fx.pendingAudio() == null);
 
     // Volume rides the Msg payload — not the rebuild-time sync path that
     // used to clobber a restored value with the previous slider thumb.
     apply(&restored, .{ .volume_changed = 0.2 });
     try testing.expectApproxEqAbs(@as(f32, 0.2), restored.volume, 0.0001);
+}
+
+test "session resume engages the player only on first play" {
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/Music/a.mp3"));
+    const a = model.user_tracks[0].id;
+    model.now = a;
+    model.elapsed_ms = 5000;
+    model.playing = true;
+
+    var buffer: [model_mod.max_session_store_bytes]u8 = undefined;
+    const bytes = model.serializeSession(&buffer);
+
+    var restored: Model = .{};
+    try testing.expect(restored.addUserTrack("/Music/a.mp3"));
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    applyFx(&restored, .{ .session_done = .{
+        .key = model_mod.session_read_key,
+        .op = .read,
+        .outcome = .ok,
+        .bytes = bytes,
+    } }, &fx);
+    try testing.expect(restored.audio_deferred);
+    try testing.expect(fx.pendingAudio() == null);
+
+    applyFx(&restored, .toggle_play, &fx);
+    try testing.expect(restored.playing);
+    try testing.expect(!restored.audio_deferred);
+    try testing.expectEqual(@as(u32, 5000), restored.elapsed_ms);
+    const audio = fx.pendingAudio() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(a, audio.key);
 }
 
 test "play album fills the playlist with every track and list-loop wraps it" {
@@ -955,7 +1043,6 @@ test "oversized cover downscales into the canvas image slot" {
     try testing.expect(model_mod.importCoverFromSource(model, album_id, source));
     try testing.expect(model_mod.loadCoverFromPath(model, &live.app_state.effects, album_id));
     try testing.expect(model.coverFor(album_id) != 0);
-    try testing.expect(model.library_notice != .failed);
 
     const info = live.harness.runtime.registeredCanvasImage(album_id).?;
     try testing.expectEqual(@as(usize, model_mod.max_cover_register_edge), info.width);

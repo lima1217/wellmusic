@@ -5,8 +5,8 @@ A native music library built on the Native SDK. Add local audio files, browse th
 ## Run
 
 ```sh
-# Once per Native SDK install/upgrade: kill macOS spectrum FFT (saves CPU while playing)
-./scripts/disable-native-spectrum.sh
+# Once per Native SDK install/upgrade: re-apply SDK patches (spectrum FFT off, …)
+./scripts/apply-sdk-patches.sh
 
 native dev
 ```

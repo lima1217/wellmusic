@@ -92,15 +92,11 @@ pub fn registerIcons() void {
 
 // ------------------------------------------------------------------ boot
 
-/// Boot effect: restore the persisted user library when a store path is set.
+/// Boot effect: library is already restored synchronously in `main` so the
+/// first frame has albums. Session restore is cheap and async; covers /
+/// migrate / title heal wait for `library_hydrate` on the first present.
 pub fn boot(model: *Model, fx: *model_mod.Effects) void {
-    if (model.storePath().len > 0) {
-        fx.readFile(.{
-            .key = model_mod.library_read_key,
-            .path = model.storePath(),
-            .on_result = model_mod.Effects.fileMsg(.library_done),
-        });
-    }
+    model_mod.bootSession(model, fx);
 }
 
 // -------------------------------------------------------------------- app
@@ -117,6 +113,7 @@ var ui_font_reg_count: usize = 0;
 /// after that copy, the app-side ~23 MB buffer is redundant. Freed on
 /// the first `onFrame` callback; see `ui_font.releaseBytes`.
 var ui_font_bytes_released: bool = false;
+var media_session_warmed: bool = false;
 
 fn prepareUiFonts() void {
     ui_font.load(std.heap.page_allocator);
@@ -268,10 +265,24 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 /// and that rebuild runs before any `on_frame` present. So the first
 /// `onFrame` is safe to drop `ui_font.loaded_bytes` — `ui_font_regs`
 /// may still hold a dangling slice, but the SDK never re-reads it.
+///
+/// The same first present also arms `library_hydrate` when launch set
+/// `library_hydrate_pending`: migrate / titles / covers stay off the
+/// critical path that paints the album grid. MediaPlayer/objc symbols
+/// warm here too so the first now-playing publish does not hitch on
+/// `dlopen` — kept out of `model` so the domain layer stays free of
+/// the platform bridge.
 pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     if (!ui_font_bytes_released) {
         ui_font_bytes_released = true;
         ui_font.releaseBytes(std.heap.page_allocator);
+    }
+    if (!media_session_warmed) {
+        media_session_warmed = true;
+        media_session.warm();
+    }
+    if (model.library_hydrate_pending) {
+        return .library_hydrate;
     }
     if (frame.size.width != model.canvas_width) {
         return Msg{ .canvas_resized = frame.size.width };
@@ -410,6 +421,11 @@ pub fn main(init: std.process.Init) !void {
             model.setMediaDir(media_dir);
         } else |_| {}
     }
+    // Restore before UiApp.init so the first painted frame already has
+    // the catalog — avoids the empty-library flash of an async read.
+    model_mod.loadLibrarySync(&model);
+    // Covers / migrate / title heal run after the first present.
+    model.library_hydrate_pending = true;
     const app_state = try std.heap.page_allocator.create(WellMusicApp);
     defer std.heap.page_allocator.destroy(app_state);
     app_state.* = WellMusicApp.init(std.heap.page_allocator, model, wellMusicOptions());

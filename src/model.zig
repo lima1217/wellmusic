@@ -58,7 +58,6 @@ pub const max_user_title = 128;
 pub const max_user_path = 1024;
 pub const max_library_store_bytes = 256 * 1024;
 pub const max_store_path = 512;
-pub const library_read_key: u64 = 3;
 pub const library_write_key: u64 = 4;
 pub const session_read_key: u64 = 5;
 pub const session_write_key: u64 = 6;
@@ -252,7 +251,7 @@ pub const min_canvas_width: f32 = 1056;
 
 /// Effect keys, model-owned identity (effect-key style). Audio playback
 /// keys are the track ids themselves — one key namespace per channel.
-// library_read_key / library_write_key live with the user-library caps.
+// library_write_key lives with the user-library caps.
 
 /// The honest degraded state when a track's file cannot load.
 pub const assets_missing_title = "couldn’t play this file";
@@ -300,19 +299,19 @@ pub const FrameClock = struct {
 
 /// How far the rendered clock may run AHEAD of a player position tick
 /// before the disagreement stops being interpolation drift and gets
-/// snapped. Drift per 500 ms tick is a few milliseconds; anything past a
+/// snapped. Drift per poll tick is a few milliseconds; anything past a
 /// full tick means reality changed (an external seek, a stall the
 /// buffering flag has not reported yet), and honesty beats smoothness.
-const position_snap_slack_ms: u32 = 600;
+const position_snap_slack_ms: u32 = 1200;
 
 /// Playback-state poll while playing. The platform emits `.spectrum`
-/// band reports at ~25 Hz whenever audio plays; each report would become
-/// an `audio_event` Msg and force a full TEA rebuild even though
-/// WellMusic draws no analyzer. So `playAudio` intentionally omits
-/// `on_event`, and this timer (~2 Hz) mirrors position / completion /
-/// failure from `fx.audioSnapshot()` instead.
+/// (~25 Hz) alongside position when `on_event` is set; WellMusic draws no
+/// analyzer. So `playAudio` intentionally omits `on_event`, and this
+/// timer (~1 Hz) mirrors position / completion / failure from
+/// `fx.audioSnapshot()` instead. No seek scrubber means sub-second UI
+/// updates buy nothing; 1 Hz still catches natural end within a beat.
 pub const audio_poll_timer_key: u64 = 43;
-pub const audio_poll_interval_ms: u64 = 500;
+pub const audio_poll_interval_ms: u64 = 1000;
 
 pub const Msg = union(enum) {
     /// Header: cycle the app theme light ↔ dark (locks off
@@ -359,7 +358,7 @@ pub const Msg = union(enum) {
     /// coarse position ticks. Journal/test path only — the live app has
     /// no seek scrubber and does not arm a playback timer.
     frame_clock: FrameClock,
-    /// ~2 Hz mirror of `fx.audioSnapshot()` while a track is loaded.
+    /// ~1 Hz mirror of `fx.audioSnapshot()` while a track is loaded.
     /// Replaces platform `on_event` delivery so ~25 Hz spectrum reports
     /// never enter the TEA loop (see `audio_poll_timer_key`).
     audio_poll: native_sdk.EffectTimer,
@@ -414,9 +413,10 @@ pub const Msg = union(enum) {
     close_edit_album,
     /// Album / cover menu: pick a new cover image for this album.
     change_cover: u8,
-    /// Clear the transient library status banner.
-    dismiss_library_notice,
-    /// Persist / restore the user library file.
+    /// First presented frame: migrate paths, heal titles, load covers.
+    /// Armed once at launch after sync library restore; never persisted.
+    library_hydrate,
+    /// Persist library writes (reads are sync at launch via `loadLibrarySync`).
     library_done: native_sdk.EffectFileResult,
     /// Persist / restore playback session (now, queue, mode, volume).
     session_done: native_sdk.EffectFileResult,
@@ -439,7 +439,7 @@ pub const Msg = union(enum) {
         "edit_album",     "edit_title",     "edit_artist",
         "save_edit_track", "close_edit_track",
         "save_edit_album", "close_edit_album", "change_cover",
-        "dismiss_library_notice",
+        "library_hydrate",
         "library_done",   "cover_done",     "volume_changed",
         "toggle_queue",   "remove_queued",  "clear_queue",
         "media_command",
@@ -563,9 +563,14 @@ pub const Model = struct {
     session_resume_track: ?u8 = null,
     session_resume_elapsed_ms: u32 = 0,
     session_resume_playing: bool = false,
-    /// Last import/remove status for the now-playing / empty surfaces.
-    library_notice: enum { none, added, removed, full, cancelled, failed, updated } = .none,
-    library_notice_count: u32 = 0,
+    /// `now` is bound for UI after session restore, but `playAudio` has
+    /// not run yet. Cleared on the first play (or when `startTrack`
+    /// replaces the binding). Avoids decoding the last track at launch.
+    audio_deferred: bool = false,
+    /// Armed at launch after sync library restore; first frame clears it
+    /// via `library_hydrate` so migrate / title heal / covers never block
+    /// the initial present.
+    library_hydrate_pending: bool = false,
 
     /// Read by the ZIG-BUILT views (grid, detail, track rows), update
     /// logic, or main's launch wiring — never bound in markup — so
@@ -598,7 +603,9 @@ pub const Model = struct {
         "session_write_inflight", "session_save_pending",
         "session_resume_track", "session_resume_elapsed_ms",
         "session_resume_playing",
-        "save_pending",    "library_notice", "library_notice_count",
+        "audio_deferred",
+        "library_hydrate_pending",
+        "save_pending",
         "storePath",       "sessionPath",    "mediaDir",
         "editTitle",
         "editArtist",      "isEditingTrack",
@@ -1517,6 +1524,48 @@ pub fn persistLibrary(model: *Model, fx: *Effects) void {
     model.store_write_inflight = true;
 }
 
+/// Sync-read `library.txt` into the model before the first frame so the
+/// album grid never flashes the empty state while an async restore races.
+/// Missing file = honest empty library; oversize/corrupt is ignored.
+pub fn loadLibrarySync(model: *Model) void {
+    const path = model.storePath();
+    if (path.len == 0) return;
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var file = if (std.fs.path.isAbsolute(path))
+        std.Io.Dir.openFileAbsolute(io, path, .{}) catch return
+    else
+        std.Io.Dir.cwd().openFile(io, path, .{}) catch return;
+    defer file.close(io);
+    const size = (file.stat(io) catch return).size;
+    if (size == 0) return;
+    if (size > max_library_store_bytes) return;
+    var buffer: [max_library_store_bytes]u8 = undefined;
+    const len: usize = @intCast(size);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    const n = reader.interface.readSliceShort(buffer[0..len]) catch return;
+    if (n != len) return;
+    _ = model.restoreLibrary(buffer[0..len]);
+}
+
+/// Kick session restore from `init_fx`. Covers / migrate / title heal wait
+/// for the first presented frame (`library_hydrate`) so they cannot stall
+/// the initial album-grid paint.
+pub fn bootSession(model: *Model, fx: *Effects) void {
+    requestSessionLoad(model, fx);
+}
+
+/// Post-first-frame library work: migrate external media, heal titles from
+/// on-disk tags, then load covers. Safe with an empty library.
+pub fn hydrateLibrary(model: *Model, fx: *Effects) void {
+    var changed = migrateExternalMedia(model);
+    if (model.refreshTitlesFromMedia()) changed = true;
+    if (changed) persistLibrary(model, fx);
+    requestAllCoverLoads(model, fx);
+}
+
 pub fn persistSession(model: *Model, fx: *Effects) void {
     if (model.session_path_len == 0) return;
     if (model.session_write_inflight) {
@@ -1694,10 +1743,7 @@ pub fn migrateExternalMedia(model: *Model) bool {
 }
 
 fn pickAndImportMusic(model: *Model, fx: *Effects) void {
-    const services = fx.services orelse {
-        model.library_notice = .failed;
-        return;
-    };
+    const services = fx.services orelse return;
     var buffer: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
     const result = services.showOpenDialog(.{
         .title = "Add Music",
@@ -1706,76 +1752,40 @@ fn pickAndImportMusic(model: *Model, fx: *Effects) void {
             .{ .name = "All files", .extensions = &.{ "*" } },
         },
         .allow_multiple = true,
-    }, &buffer) catch {
-        model.library_notice = .failed;
-        return;
-    };
-    if (result.count == 0) {
-        model.library_notice = .cancelled;
-        return;
-    }
+    }, &buffer) catch return;
+    if (result.count == 0) return;
     var added: u32 = 0;
-    var hit_full = false;
     var paths = std.mem.splitScalar(u8, result.paths, '\n');
     while (paths.next()) |path| {
         const trimmed = std.mem.trim(u8, path, " \r");
         if (trimmed.len == 0) continue;
-        if (model.user_track_count >= max_user_tracks) {
-            hit_full = true;
-            break;
-        }
+        if (model.user_track_count >= max_user_tracks) break;
         if (importAudioFromSource(model, imported_album_id, trimmed)) added += 1;
     }
-    if (added > 0) {
-        model.library_notice = .added;
-        model.library_notice_count = added;
-        persistLibrary(model, fx);
-    } else if (hit_full) {
-        model.library_notice = .full;
-    } else {
-        model.library_notice = .cancelled;
-    }
+    if (added > 0) persistLibrary(model, fx);
 }
 
 fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
-    const services = fx.services orelse {
-        model.library_notice = .failed;
-        return;
-    };
+    const services = fx.services orelse return;
     var buffer: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
     const result = services.showOpenDialog(.{
         .title = "Import Album",
         .allow_directories = true,
         .allow_multiple = false,
-    }, &buffer) catch {
-        model.library_notice = .failed;
-        return;
-    };
-    if (result.count == 0) {
-        model.library_notice = .cancelled;
-        return;
-    }
+    }, &buffer) catch return;
+    if (result.count == 0) return;
     var paths = std.mem.splitScalar(u8, result.paths, '\n');
     const dir_path = while (paths.next()) |raw| {
         const trimmed = std.mem.trim(u8, raw, " \r");
         if (trimmed.len > 0) break trimmed;
-    } else {
-        model.library_notice = .cancelled;
-        return;
-    };
-    if (dir_path.len > max_user_path) {
-        model.library_notice = .failed;
-        return;
-    }
+    } else return;
+    if (dir_path.len > max_user_path) return;
 
     var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch {
-        model.library_notice = .failed;
-        return;
-    };
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
     var audio_paths: [max_user_tracks][max_user_path]u8 = undefined;
@@ -1805,10 +1815,7 @@ fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
         audio_count += 1;
     }
 
-    if (audio_count == 0) {
-        model.library_notice = .cancelled;
-        return;
-    }
+    if (audio_count == 0) return;
 
     // Sort by basename so track numbers follow filename order.
     var order: [max_user_tracks]usize = undefined;
@@ -1829,25 +1836,17 @@ fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
 
     const title = std.fs.path.basename(dir_path);
     const artist = albumArtistFromDir(dir_path);
-    const album_id = model.addUserAlbum(title, artist) orelse {
-        model.library_notice = .full;
-        return;
-    };
+    const album_id = model.addUserAlbum(title, artist) orelse return;
 
     var added: u32 = 0;
-    var hit_full = false;
     for (order[0..audio_count]) |idx| {
-        if (model.user_track_count >= max_user_tracks) {
-            hit_full = true;
-            break;
-        }
+        if (model.user_track_count >= max_user_tracks) break;
         const path = audio_paths[idx][0..audio_lens[idx]];
         if (importAudioFromSource(model, album_id, path)) added += 1;
     }
 
     if (added == 0) {
         model.removeUserAlbum(album_id);
-        model.library_notice = if (hit_full) .full else .cancelled;
         return;
     }
 
@@ -1857,22 +1856,14 @@ fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
         }
     }
 
-    model.library_notice = .added;
-    model.library_notice_count = added;
     model.open_album = album_id;
     model.detail_scroll = 0;
     persistLibrary(model, fx);
 }
 
 fn pickAndSetCover(model: *Model, fx: *Effects, album_id: u8) void {
-    if (model.userAlbumById(album_id) == null) {
-        model.library_notice = .failed;
-        return;
-    }
-    const services = fx.services orelse {
-        model.library_notice = .failed;
-        return;
-    };
+    if (model.userAlbumById(album_id) == null) return;
+    const services = fx.services orelse return;
     var buffer: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
     const result = services.showOpenDialog(.{
         .title = "Choose Cover",
@@ -1881,37 +1872,17 @@ fn pickAndSetCover(model: *Model, fx: *Effects, album_id: u8) void {
             .{ .name = "All files", .extensions = &.{ "*" } },
         },
         .allow_multiple = false,
-    }, &buffer) catch {
-        model.library_notice = .failed;
-        return;
-    };
-    if (result.count == 0) {
-        model.library_notice = .cancelled;
-        return;
-    }
+    }, &buffer) catch return;
+    if (result.count == 0) return;
     var paths = std.mem.splitScalar(u8, result.paths, '\n');
     const path = while (paths.next()) |raw| {
         const trimmed = std.mem.trim(u8, raw, " \r");
         if (trimmed.len > 0) break trimmed;
-    } else {
-        model.library_notice = .cancelled;
-        return;
-    };
-    if (path.len > max_user_path) {
-        model.library_notice = .failed;
-        return;
-    }
-    if (!importCoverFromSource(model, album_id, path)) {
-        model.library_notice = .failed;
-        return;
-    }
+    } else return;
+    if (path.len > max_user_path) return;
+    if (!importCoverFromSource(model, album_id, path)) return;
     persistLibrary(model, fx);
-    if (!loadCoverFromPath(model, fx, album_id)) {
-        model.library_notice = .failed;
-        return;
-    }
-    model.library_notice = .updated;
-    model.library_notice_count = 1;
+    _ = loadCoverFromPath(model, fx, album_id);
 }
 
 fn requestCoverLoad(model: *Model, fx: *Effects, album_id: u8) void {
@@ -1924,6 +1895,20 @@ fn requestAllCoverLoads(model: *Model, fx: *Effects) void {
     }
 }
 
+/// Process-lifetime RGBA decode scratch shared across sequential cover
+/// loads so boot-time hydration does not alloc/free ~64 MiB per album.
+var cover_decode_scratch: []u8 = &.{};
+
+fn coverDecodeScratch(bytes: usize) ?[]u8 {
+    if (cover_decode_scratch.len >= bytes) return cover_decode_scratch[0..bytes];
+    if (cover_decode_scratch.len > 0) std.heap.page_allocator.free(cover_decode_scratch);
+    cover_decode_scratch = std.heap.page_allocator.alloc(u8, bytes) catch {
+        cover_decode_scratch = &.{};
+        return null;
+    };
+    return cover_decode_scratch;
+}
+
 fn applySessionResume(model: *Model, fx: *Effects) void {
     fx.setAudioVolume(model.volume);
     const id = model.session_resume_track orelse return;
@@ -1932,12 +1917,59 @@ fn applySessionResume(model: *Model, fx: *Effects) void {
     // when the previous run quit mid-playback (`playing` in the store).
     model.session_resume_track = null;
     model.session_resume_playing = false;
-    startTrack(model, fx, id);
-    if (elapsed > 0) {
-        model.elapsed_ms = elapsed;
-        fx.seekAudio(elapsed);
+
+    const track = model.resolveTrack(id) orelse return;
+    model.now = id;
+    model.selected = id;
+    model.elapsed_ms = elapsed;
+    model.now_duration_ms = track.duration_ms;
+    model.platform_duration_ms = 0;
+    model.assets_missing = false;
+    model.playing = false;
+    // Defer playAudio/seek until the user presses play — cold launch
+    // should not decode the last track just to show the transport.
+    model.audio_deferred = true;
+    syncAudioPollTimer(model, fx);
+}
+
+/// Load the deferred session track into the platform player (seek + play
+/// or pause). No-op when playback already engaged the engine.
+fn engageDeferredAudio(model: *Model, fx: *Effects, play: bool) void {
+    if (!model.audio_deferred) return;
+    const id = model.now orelse {
+        model.audio_deferred = false;
+        return;
+    };
+    const track = model.resolveTrack(id) orelse {
+        model.audio_deferred = false;
+        return;
+    };
+    const elapsed = model.elapsed_ms;
+    model.audio_deferred = false;
+    if (fx.executor != .fake and !localAudioReadable(track.path)) {
+        model.assets_missing = true;
+        model.now = null;
+        model.playing = false;
+        model.elapsed_ms = 0;
+        model.now_duration_ms = 0;
+        model.platform_duration_ms = 0;
+        persistSession(model, fx);
+        return;
     }
-    setPlaying(model, fx, false);
+    fx.playAudio(.{
+        .key = id,
+        .path = track.path,
+    });
+    fx.setAudioVolume(model.volume);
+    if (elapsed > 0) fx.seekAudio(elapsed);
+    model.playing = play;
+    if (play) {
+        fx.resumeAudio();
+    } else {
+        fx.pauseAudio();
+    }
+    syncAudioPollTimer(model, fx);
+    persistSession(model, fx);
 }
 
 /// Read the album's cover file, decode via the platform codec, downscale
@@ -2031,11 +2063,10 @@ fn registerCoverEncoded(model: *Model, fx: *Effects, album_id: u8, encoded: []co
 
     if (fx.services) |services| {
         const decode_bytes = max_cover_decode_edge * max_cover_decode_edge * 4;
-        const decode_buf = std.heap.page_allocator.alloc(u8, decode_bytes) catch {
+        const decode_buf = coverDecodeScratch(decode_bytes) orelse {
             album.cover = 0;
             return false;
         };
-        defer std.heap.page_allocator.free(decode_buf);
 
         const decoded = services.decodeImage(encoded, decode_buf) catch {
             album.cover = 0;
@@ -2232,8 +2263,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const was_playing = model.now == id;
             if (!model.removeUserTrack(id)) return;
             if (model.editing_track == id) model.cancelEditTrack();
-            model.library_notice = .removed;
-            model.library_notice_count = 1;
             if (was_playing) fx.stopAudio();
             persistLibrary(model, fx);
         },
@@ -2248,46 +2277,28 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .edit_artist => |edit| model.edit_artist_buffer.apply(edit),
         .save_edit_track => {
             if (!model.applyEditTrack()) return;
-            model.library_notice = .updated;
-            model.library_notice_count = 1;
             persistLibrary(model, fx);
         },
         .close_edit_track => model.cancelEditTrack(),
         .save_edit_album => {
             if (!model.applyEditAlbum()) return;
-            model.library_notice = .updated;
-            model.library_notice_count = 1;
             persistLibrary(model, fx);
         },
         .close_edit_album => model.cancelEditAlbum(),
         .change_cover => |album_id| pickAndSetCover(model, fx, album_id),
-        .dismiss_library_notice => {
-            model.library_notice = .none;
-            model.library_notice_count = 0;
+        .library_hydrate => {
+            if (!model.library_hydrate_pending) return;
+            model.library_hydrate_pending = false;
+            hydrateLibrary(model, fx);
         },
         .library_done => |result| switch (result.op) {
-            .read => switch (result.outcome) {
-                .ok => {
-                    if (model.restoreLibrary(result.bytes)) {
-                        var changed = migrateExternalMedia(model);
-                        if (model.refreshTitlesFromMedia()) changed = true;
-                        if (changed) persistLibrary(model, fx);
-                        requestAllCoverLoads(model, fx);
-                        requestSessionLoad(model, fx);
-                    } else {
-                        model.library_notice = .failed;
-                    }
-                },
-                .not_found => requestSessionLoad(model, fx),
-                else => model.library_notice = .failed,
-            },
+            // Launch loads the library sync; async reads are unused.
+            .read => {},
             .write => {
                 model.store_write_inflight = false;
                 if (result.outcome == .ok and model.save_pending) {
                     model.save_pending = false;
                     persistLibrary(model, fx);
-                } else if (result.outcome != .ok) {
-                    model.library_notice = .failed;
                 }
             },
         },
@@ -2310,19 +2321,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             },
         },
         .cover_done => |result| {
-            const album_id = albumIdFromCoverKey(result.key) orelse {
-                model.library_notice = .failed;
-                return;
-            };
+            const album_id = albumIdFromCoverKey(result.key) orelse return;
             switch (result.outcome) {
-                .ok => {
-                    if (!applyCoverBytes(model, fx, album_id, result.bytes)) {
-                        model.library_notice = .failed;
-                    }
-                },
-                else => {
-                    if (model.userAlbumByIdMut(album_id)) |album| album.cover = 0;
-                    model.library_notice = .failed;
+                .ok => _ = applyCoverBytes(model, fx, album_id, result.bytes),
+                else => if (model.userAlbumByIdMut(album_id)) |album| {
+                    album.cover = 0;
                 },
             }
         },
@@ -2465,7 +2468,7 @@ fn moveSelection(model: *Model, step: SelectionStep) void {
     if (target) |id| model.selected = id;
 }
 
-/// Arm or disarm the ~2 Hz audio poll while actually playing.
+/// Arm or disarm the ~1 Hz audio poll while actually playing.
 /// Paused / idle stay quiet. Idempotent edge transitions only
 /// (re-arming every update starves fires).
 fn syncAudioPollTimer(model: *Model, fx: *Effects) void {
@@ -2490,6 +2493,7 @@ fn syncAudioPollTimer(model: *Model, fx: *Effects) void {
 /// copies them into Model at poll cadence.
 fn pollAudioChannel(model: *Model, fx: *Effects) void {
     const now_id = model.now orelse return;
+    if (model.audio_deferred) return;
     const snap = fx.audioSnapshot();
     if (snap.active and snap.key != now_id) return;
     if (!snap.active) {
@@ -2566,6 +2570,7 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     // still unplayable the `.failed` event raises the right one again.
     model.assets_missing = false;
     model.playing = true;
+    model.audio_deferred = false;
     // Imported tracks are local paths. If a file was moved or deleted,
     // fail before asking the host — and
     // persist so session resume does not keep retrying a dead path.
@@ -2612,6 +2617,12 @@ pub fn localAudioReadable(path: []const u8) bool {
 /// Play/pause drive the platform player in place; the optimistic flag
 /// keeps the transport responsive and the next audio event confirms it.
 fn setPlaying(model: *Model, fx: *Effects, playing: bool) void {
+    if (model.audio_deferred) {
+        // Session-restored binding: first play engages the engine (+seek);
+        // pause with no engine is already the restored state.
+        if (playing) engageDeferredAudio(model, fx, true);
+        return;
+    }
     model.playing = playing;
     if (playing) {
         fx.resumeAudio();

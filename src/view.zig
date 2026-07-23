@@ -192,7 +192,6 @@ fn editAlbumDialog(ui: *Ui, model: *const Model) Ui.Node {
 fn desktopShell(ui: *Ui, model: *const Model) Ui.Node {
     return ui.column(.{ .grow = 1 }, .{
         chromeBand(ui, CompiledHeaderView.build(ui, model)),
-        libraryNoticeBand(ui, model),
         // Paint the middle with the page token — layout backgrounds do
         // not fill, and relying on GPU clear alone left the body one
         // frame (or one rebuild path) behind chrome after a theme flip.
@@ -200,34 +199,6 @@ fn desktopShell(ui: *Ui, model: *const Model) Ui.Node {
         if (model.queue_open) queuePanel(ui, model) else ui.el(.stack, .{}, .{}),
         chromeBand(ui, CompiledNowPlayingView.build(ui, model)),
     });
-}
-
-fn libraryNoticeBand(ui: *Ui, model: *const Model) Ui.Node {
-    const text: []const u8 = switch (model.library_notice) {
-        .none, .cancelled => return ui.el(.stack, .{}, .{}),
-        .added => ui.fmt("Added {d} track{s}", .{
-            model.library_notice_count,
-            if (model.library_notice_count == 1) "" else "s",
-        }),
-        .removed => "Removed from library",
-        .full => "Library is full",
-        .failed => "That didn’t work. Try again.",
-        .updated => "Saved",
-    };
-    return chromeBand(ui, ui.row(.{
-        .padding = 12,
-        .gap = 12,
-        .cross = .center,
-        .semantics = .{ .label = "Library status" },
-    }, .{
-        ui.text(.{ .grow = 1 }, text),
-        ui.button(.{
-            .variant = .ghost,
-            .size = .sm,
-            .on_press = .dismiss_library_notice,
-            .semantics = .{ .label = "Dismiss status" },
-        }, "Dismiss"),
-    }));
 }
 
 /// Full-bleed chrome over the page fill. Layout `row`/`column` backgrounds

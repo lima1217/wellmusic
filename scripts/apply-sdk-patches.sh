@@ -10,6 +10,10 @@ if(!m){console.error('native_sdk path not found'); process.exit(1);}
 console.log(require('path').resolve('.', m[1]));
 ")"
 echo "SDK: $sdk"
+"$root/scripts/disable-native-spectrum.sh" || {
+  echo "apply-sdk-patches: spectrum disable failed" >&2
+  exit 1
+}
 for patch in "$root"/patches/*.patch; do
   [ -f "$patch" ] || continue
   echo "Applying $(basename "$patch")"
