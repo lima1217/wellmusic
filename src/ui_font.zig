@@ -6,15 +6,18 @@
 //! actually maps them.
 //!
 //! macOS ships two Supplemental TrueType faces under the SDK's 24 MiB
-//! registration budget. Prefer the smaller GB18030 face (~7 MiB) so
-//! launch does not read/parse the 22 MiB Arial Unicode dump on every
-//! cold start; keep Arial Unicode as the fallback when the GB18030 face
-//! is missing or over outline budget. The app package stays small; only
+//! registration budget. The smaller GB18030 face (~7 MiB) is tried first,
+//! with Arial Unicode (~22 MiB) as the fallback; a candidate is accepted
+//! only if it passes the same `Face.parse` registration runs. Current
+//! macOS ships NISC18030 without a 'head' table, so Arial Unicode is the
+//! face in practice. The app package stays small; only
 //! the process RSS grows by the chosen face size.
 //!
 //! Boot skips registration when the restored library has no CJK text
-//! (`libraryNeedsCjkFont`). Fonts install exactly once on the installing
-//! frame — a first CJK import in a Latin-only session needs relaunch.
+//! (`libraryNeedsCjkFont`). When a later import or edit brings the first
+//! CJK text into a Latin-only session, main.zig registers the face late
+//! through `runtime.registerCanvasFont`; UiApp then re-measures every
+//! surface on the next frame.
 //!
 //! Candidate paths are macOS-only. Other targets need their own paths
 //! or a bundled face.
@@ -58,10 +61,12 @@ pub fn load(allocator: std.mem.Allocator) void {
     const io = threaded.io();
     for (candidate_paths) |path| {
         const face_bytes = readAbsolute(allocator, io, path) catch continue;
-        // Cheap prefilter only: table-directory + `maxp` budgets. Full
-        // `Face.parse` runs again at `Options.fonts` registration, so a
-        // second whole-file parse here just burned cold-start time.
-        if (!faceWithinOutlineBudgets(face_bytes)) {
+        // Accept only what registration will: the `maxp` budget prefilter
+        // alone let NISC18030 through, but it is an Apple 'true' face
+        // without a 'head' table, so the runtime refused it and the theme
+        // still named its font id — CJK stayed tofu. `parseFailureReason`
+        // runs the same `Face.parse` registration does.
+        if (!faceWithinOutlineBudgets(face_bytes) or canvas.font_ttf.parseFailureReason(face_bytes) != null) {
             allocator.free(face_bytes);
             continue;
         }
@@ -78,6 +83,14 @@ pub fn releaseBytes(allocator: std.mem.Allocator) void {
     if (loaded_bytes.len == 0) return;
     allocator.free(loaded_bytes);
     loaded_bytes = &.{};
+}
+
+/// Drop a loaded face the runtime refused, so the theme stops stamping a
+/// font id that was never registered.
+pub fn discard(allocator: std.mem.Allocator) void {
+    releaseBytes(allocator);
+    face_ready = false;
+    loaded_name = "";
 }
 
 fn faceWithinOutlineBudgets(bytes: []const u8) bool {
@@ -125,7 +138,7 @@ pub fn resetForTest(allocator: std.mem.Allocator) void {
     face_ready = false;
 }
 
-test "load prefers the smaller GB18030 face on macOS" {
+test "load only accepts a face the runtime can register" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     resetForTest(alloc);
@@ -133,9 +146,9 @@ test "load prefers the smaller GB18030 face on macOS" {
 
     load(alloc);
     try std.testing.expect(ready());
-    try std.testing.expectEqualStrings("NISC18030.ttf", name());
-    // Still under Arial Unicode's footprint — the whole point of the prefer.
-    try std.testing.expect(faceBytes().len < 12 * 1024 * 1024);
+    // Registration runs `Face.parse`; whichever candidate won must pass it.
+    try std.testing.expectEqual(@as(?[]const u8, null), canvas.font_ttf.parseFailureReason(faceBytes()));
+    try std.testing.expect(faceBytes().len <= max_font_bytes);
 }
 
 test "outline budget prefilter accepts Supplemental TrueType headers" {

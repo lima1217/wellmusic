@@ -89,6 +89,9 @@ pub const max_cover_decode_edge: usize = 4096;
 /// 512² avatar budget: album tiles and the 52pt now-playing cover do
 /// not need full-res pixels, and 256² cuts texture RSS ~4×.
 pub const max_cover_register_edge: usize = 256;
+/// Background import: one `/bin/cp` at a time copies a picked file into
+/// `media/`, so a large album never blocks the UI thread.
+pub const import_spawn_key: u64 = 7;
 pub const library_store_header_v1 = "wellmusic-library v1";
 pub const library_store_header_v2 = "wellmusic-library v2";
 pub const library_store_header = "wellmusic-library v3";
@@ -152,6 +155,7 @@ pub const UserAlbum = struct {
         const kept = metadata.utf8Prefix(value, max_user_title);
         @memcpy(album.title_storage[0..kept.len], kept);
         album.title_len = kept.len;
+        scrubFieldSeparators(album.title_storage[0..kept.len]);
         album.refreshInitials();
     }
 
@@ -159,6 +163,7 @@ pub const UserAlbum = struct {
         const kept = metadata.utf8Prefix(value, max_user_title);
         @memcpy(album.artist_storage[0..kept.len], kept);
         album.artist_len = kept.len;
+        scrubFieldSeparators(album.artist_storage[0..kept.len]);
         album.refreshInitials();
     }
 
@@ -226,18 +231,31 @@ pub const UserTrack = struct {
         const kept = metadata.utf8Prefix(value, max_user_title);
         @memcpy(track.title_storage[0..kept.len], kept);
         track.title_len = kept.len;
+        scrubFieldSeparators(track.title_storage[0..kept.len]);
     }
 
     pub fn setArtist(track: *UserTrack, value: []const u8) void {
         const kept = metadata.utf8Prefix(value, max_user_title);
         @memcpy(track.artist_storage[0..kept.len], kept);
         track.artist_len = kept.len;
+        scrubFieldSeparators(track.artist_storage[0..kept.len]);
     }
 
     fn setPath(track: *UserTrack, value: []const u8) void {
         const len = @min(value.len, max_user_path);
         @memcpy(track.path_storage[0..len], value[0..len]);
         track.path_len = len;
+    }
+};
+
+/// One picked file waiting for (or in) its background copy.
+pub const ImportJob = struct {
+    album_id: u8 = 0,
+    source_storage: [max_user_path]u8 = undefined,
+    source_len: usize = 0,
+
+    pub fn source(job: *const ImportJob) []const u8 {
+        return job.source_storage[0..job.source_len];
     }
 };
 
@@ -279,9 +297,18 @@ pub const assets_missing_hint = "check the path or re-add the track";
 pub const PlayMode = enum {
     /// Wrap within the playlist (or album when the playlist is empty).
     list_loop,
+    /// Repeat the current track when it ends; Next / Previous still move
+    /// through the list like `list_loop`.
+    single_loop,
+    /// Random order over the playlist (or album): every track plays once
+    /// before any repeats, and Previous retraces the shuffle.
+    shuffle,
     /// Play the playlist (or album) once and stop on the last track.
     sequential,
 };
+
+/// Shuffle remembers this many played tracks for Previous.
+pub const shuffle_history_cap = 64;
 
 /// App-owned light/dark preference. `system` means follow the OS color
 /// scheme from `appearance`; `light`/`dark` lock the tokens until the
@@ -327,6 +354,14 @@ const position_snap_slack_ms: u32 = 1200;
 /// updated inside the poll (content-throttled) without waiting on view.
 pub const audio_poll_timer_key: u64 = 43;
 pub const audio_poll_interval_ms: u64 = 2000;
+/// One-shot follow-up poll aimed just past the track's expected end.
+/// The 2 s cadence alone noticed a natural end up to 2 s late, which
+/// was audible as silence between tracks; once a poll sees the end
+/// inside the next interval, this lands a poll right after it.
+pub const audio_end_timer_key: u64 = 44;
+/// How far past the expected end the follow-up poll lands (the player
+/// must already report stopped), and the retry step while it has not.
+pub const audio_end_margin_ms: u64 = 40;
 
 pub const Msg = union(enum) {
     /// Header: cycle the app theme light ↔ dark (locks off
@@ -392,8 +427,10 @@ pub const Msg = union(enum) {
     remove_queued: u8,
     /// Clear the playlist.
     clear_queue,
-    /// Drain a macOS remote-command / media-key binding into transport.
-    media_command: enum { toggle_play, next, previous },
+    /// A transport command from the status-item menu, a media key, or the
+    /// system's remote commands (Control Center, headphone buttons).
+    /// `play` / `pause` are explicit so a repeated press never flips state.
+    media_command: enum { toggle_play, play, pause, next, previous },
     /// Every audio playback report: the load acknowledgment, position
     /// ticks, the one completion, and failures. Tests and journals send
     /// these directly; the live player does not — see `audio_poll`.
@@ -435,6 +472,8 @@ pub const Msg = union(enum) {
     /// One album cover decode after `library_hydrate` (or after import).
     /// Spread across presents so first paint stays light.
     cover_hydrate,
+    /// The background `/bin/cp` for the head import job exited.
+    import_copied: native_sdk.EffectExit,
     /// Persist library writes (reads are sync at launch via `loadLibrarySync`).
     library_done: native_sdk.EffectFileResult,
     /// Persist / restore playback session (now, queue, mode, volume).
@@ -459,10 +498,12 @@ pub const Msg = union(enum) {
         "save_edit_track", "close_edit_track",
         "save_edit_album", "close_edit_album", "change_cover",
         "library_hydrate", "cover_hydrate",
+        "import_copied",
         "library_done",   "cover_done",     "volume_changed",
         "toggle_queue",   "remove_queued",  "clear_queue",
         "media_command",
         "session_done",
+        "toggle_add_menu", "close_add_menu",
     };
 };
 
@@ -535,6 +576,15 @@ pub const Model = struct {
     queue: [max_queue]u8 = @splat(0),
     queue_len: usize = 0,
     queue_dropped: u32 = 0,
+    /// Shuffle: ids already played in the current pass, so every track
+    /// plays once before any repeats.
+    shuffle_played: std.StaticBitSet(256) = std.StaticBitSet(256).initEmpty(),
+    /// Shuffle: ids in the order they played, for Previous.
+    shuffle_history: [shuffle_history_cap]u8 = @splat(0),
+    shuffle_history_len: usize = 0,
+    /// Shuffle PRNG state. Model-owned so `update` stays a pure function
+    /// of the model (replays pick the same order); main seeds it per launch.
+    shuffle_rng: u64 = 0x9E3779B97F4A7C15,
     /// Volume slider value (0..1), set by `volume_changed` and applied
     /// with `fx.setAudioVolume`. Remembered in the session store.
     volume: f32 = 1.0,
@@ -592,6 +642,20 @@ pub const Model = struct {
     /// every album with a path has been tried.
     cover_hydrate_pending: bool = false,
     cover_hydrate_index: usize = 0,
+    /// Bumped on every catalog change (`persistLibrary`), so platform
+    /// glue can re-check derived needs — the CJK face — only when the
+    /// catalog actually moved.
+    library_revision: u32 = 0,
+    /// Background import queue: jobs `[import_head, import_len)` are
+    /// waiting; while `import_inflight_id` is set, the head job is
+    /// copying under that reserved track id.
+    import_jobs: [max_user_tracks]ImportJob = undefined,
+    import_head: usize = 0,
+    import_len: usize = 0,
+    import_inflight_id: ?u8 = null,
+    /// Progress for the "Importing n / total" line; reset when drained.
+    import_total: usize = 0,
+    import_done: usize = 0,
 
     /// Read by the ZIG-BUILT views (grid, detail, track rows), update
     /// logic, or main's launch wiring — never bound in markup — so
@@ -609,6 +673,8 @@ pub const Model = struct {
         "assets_missing",
         "audio_poll_armed",
         "queue_dropped",
+        "shuffle_played",  "shuffle_history", "shuffle_history_len",
+        "shuffle_rng",
         "volume",
         "appearance",      "theme",          "queue",          "queue_len",
         "editing_track",   "editing_album",  "edit_title_buffer",
@@ -627,6 +693,11 @@ pub const Model = struct {
         "audio_deferred",
         "library_hydrate_pending",
         "cover_hydrate_pending", "cover_hydrate_index",
+        "library_revision",
+        "add_menu_open",
+        "import_jobs",     "import_head",    "import_len",
+        "import_inflight_id", "import_total", "import_done",
+        "importStatus",
         "save_pending",
         "storePath",       "sessionPath",    "mediaDir",
         "editTitle",
@@ -787,6 +858,12 @@ pub const Model = struct {
         return album.title();
     }
 
+    /// "Importing 3 / 12…" while the background import runs, else "".
+    pub fn importStatus(model: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (model.import_total == 0) return "";
+        return std.fmt.allocPrint(arena, "Importing {d} / {d}…", .{ @min(model.import_done + 1, model.import_total), model.import_total }) catch "";
+    }
+
     pub fn hasNowPlaying(model: *const Model) bool {
         return model.now != null;
     }
@@ -807,7 +884,19 @@ pub const Model = struct {
     pub fn playModeIcon(model: *const Model) []const u8 {
         return switch (model.play_mode) {
             .list_loop => "repeat",
+            .single_loop => "app:repeat-one",
+            .shuffle => "shuffle",
             .sequential => "app:sequential",
+        };
+    }
+
+    /// Accessible name for the play-mode button: the mode in effect.
+    pub fn playModeLabel(model: *const Model) []const u8 {
+        return switch (model.play_mode) {
+            .list_loop => "Play mode: repeat all",
+            .single_loop => "Play mode: repeat one",
+            .shuffle => "Play mode: shuffle",
+            .sequential => "Play mode: in order",
         };
     }
 
@@ -1190,6 +1279,8 @@ pub const Model = struct {
             model.platform_duration_ms = 0;
         }
         if (model.selected == id) model.selected = null;
+        // Ids recycle: a later import must not inherit "already played".
+        model.shuffle_played.unset(id);
         if (path_len > 0) deleteManagedMediaFile(model, path_buf[0..path_len]);
         return true;
     }
@@ -1323,80 +1414,19 @@ pub const Model = struct {
         model.user_album_count = 0;
         model.user_track_count = 0;
         var legacy_cover: ?[]const u8 = null;
+        var skipped: usize = 0;
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \r");
             if (line.len == 0) continue;
-            var parts = std.mem.splitScalar(u8, line, '\t');
-            const kind = parts.next() orelse return false;
-            if (std.mem.eql(u8, kind, "cover")) {
-                // v1/v2 Library cover line.
-                const path = parts.next() orelse return false;
-                if (parts.next() != null) return false;
-                if (path.len == 0 or path.len > max_user_path) return false;
-                legacy_cover = path;
-                continue;
-            }
-            if (std.mem.eql(u8, kind, "album")) {
-                if (version < 3) return false;
-                const id_text = parts.next() orelse return false;
-                const title = parts.next() orelse return false;
-                const artist = parts.next() orelse return false;
-                const year_text = parts.next() orelse return false;
-                const cover_path = parts.next() orelse return false;
-                if (parts.next() != null) return false;
-                if (model.user_album_count >= max_user_albums) return false;
-                const id = std.fmt.parseInt(u8, id_text, 10) catch return false;
-                const year = std.fmt.parseInt(u16, year_text, 10) catch return false;
-                if (id < first_user_album_id or title.len > max_user_title or artist.len > max_user_title) return false;
-                if (cover_path.len > max_user_path) return false;
-                var album: UserAlbum = .{};
-                album.id = id;
-                album.year = year;
-                album.setTitle(title);
-                album.setArtist(artist);
-                if (cover_path.len > 0) album.setCoverPath(cover_path);
-                model.user_albums[model.user_album_count] = album;
-                model.user_album_count += 1;
-                continue;
-            }
-            if (!std.mem.eql(u8, kind, "track")) return false;
-            const id_text = parts.next() orelse return false;
-            const album_text: []const u8 = if (version >= 3) blk: {
-                break :blk parts.next() orelse return false;
-            } else "";
-            const number_text = parts.next() orelse return false;
-            const title = parts.next() orelse return false;
-            const artist: []const u8 = if (version >= 2) blk: {
-                break :blk parts.next() orelse return false;
-            } else "";
-            const path = parts.next() orelse return false;
-            const duration_text = parts.next() orelse return false;
-            if (parts.next() != null) return false;
-            if (model.user_track_count >= max_user_tracks) return false;
-            const id = std.fmt.parseInt(u8, id_text, 10) catch return false;
-            const number = std.fmt.parseInt(u8, number_text, 10) catch return false;
-            const duration_ms = std.fmt.parseInt(u32, duration_text, 10) catch return false;
-            if (id < first_user_track_id or path.len == 0 or path.len > max_user_path) return false;
-            if (title.len > max_user_title or artist.len > max_user_title) return false;
-            const album_id: u8 = if (version >= 3)
-                (std.fmt.parseInt(u8, album_text, 10) catch return false)
-            else
-                imported_album_id;
-            if (version < 3) {
-                if (!model.ensureLibraryAlbum()) return false;
-            } else if (model.userAlbumById(album_id) == null) {
-                return false;
-            }
-            var track: UserTrack = .{};
-            track.id = id;
-            track.album = album_id;
-            track.number = number;
-            track.duration_ms = duration_ms;
-            track.setTitle(title);
-            track.setArtist(artist);
-            track.setPath(path);
-            model.user_tracks[model.user_track_count] = track;
-            model.user_track_count += 1;
+            // One malformed record (hand edit, truncated write) drops that
+            // record, not the library: failing here left a partial model
+            // that the next save would persist over the good file.
+            if (!model.restoreRecord(version, line, &legacy_cover)) skipped += 1;
+        }
+        // A skipped track leaves a hole in its album's numbering, and the
+        // detail view walks numbers 1..count.
+        if (skipped > 0) {
+            for (model.user_albums[0..model.user_album_count]) |*album| model.renumberAlbumTracks(album.id);
         }
         if (version < 3) {
             if (!model.ensureLibraryAlbum() and model.user_track_count > 0) return false;
@@ -1406,6 +1436,85 @@ pub const Model = struct {
                 }
             }
         }
+        return true;
+    }
+
+    /// Parse one library record into the model. False means the record
+    /// was malformed or conflicts with one already restored, and is skipped.
+    fn restoreRecord(model: *Model, version: u8, line: []const u8, legacy_cover: *?[]const u8) bool {
+        var parts = std.mem.splitScalar(u8, line, '\t');
+        const kind = parts.next() orelse return false;
+        if (std.mem.eql(u8, kind, "cover")) {
+            // v1/v2 Library cover line.
+            const path = parts.next() orelse return false;
+            if (parts.next() != null) return false;
+            if (path.len == 0 or path.len > max_user_path) return false;
+            legacy_cover.* = path;
+            return true;
+        }
+        if (std.mem.eql(u8, kind, "album")) {
+            if (version < 3) return false;
+            const id_text = parts.next() orelse return false;
+            const title = parts.next() orelse return false;
+            const artist = parts.next() orelse return false;
+            const year_text = parts.next() orelse return false;
+            const cover_path = parts.next() orelse return false;
+            if (parts.next() != null) return false;
+            if (model.user_album_count >= max_user_albums) return false;
+            const id = std.fmt.parseInt(u8, id_text, 10) catch return false;
+            const year = std.fmt.parseInt(u16, year_text, 10) catch return false;
+            if (id < first_user_album_id or title.len > max_user_title or artist.len > max_user_title) return false;
+            if (cover_path.len > max_user_path) return false;
+            if (model.userAlbumById(id) != null) return false;
+            var album: UserAlbum = .{};
+            album.id = id;
+            album.year = year;
+            album.setTitle(title);
+            album.setArtist(artist);
+            if (cover_path.len > 0) album.setCoverPath(cover_path);
+            model.user_albums[model.user_album_count] = album;
+            model.user_album_count += 1;
+            return true;
+        }
+        if (!std.mem.eql(u8, kind, "track")) return false;
+        const id_text = parts.next() orelse return false;
+        const album_text: []const u8 = if (version >= 3) blk: {
+            break :blk parts.next() orelse return false;
+        } else "";
+        const number_text = parts.next() orelse return false;
+        const title = parts.next() orelse return false;
+        const artist: []const u8 = if (version >= 2) blk: {
+            break :blk parts.next() orelse return false;
+        } else "";
+        const path = parts.next() orelse return false;
+        const duration_text = parts.next() orelse return false;
+        if (parts.next() != null) return false;
+        if (model.user_track_count >= max_user_tracks) return false;
+        const id = std.fmt.parseInt(u8, id_text, 10) catch return false;
+        const number = std.fmt.parseInt(u8, number_text, 10) catch return false;
+        const duration_ms = std.fmt.parseInt(u32, duration_text, 10) catch return false;
+        if (id < first_user_track_id or path.len == 0 or path.len > max_user_path) return false;
+        if (title.len > max_user_title or artist.len > max_user_title) return false;
+        if (model.userTrackById(id) != null) return false;
+        const album_id: u8 = if (version >= 3)
+            (std.fmt.parseInt(u8, album_text, 10) catch return false)
+        else
+            imported_album_id;
+        if (version < 3) {
+            if (!model.ensureLibraryAlbum()) return false;
+        } else if (model.userAlbumById(album_id) == null) {
+            return false;
+        }
+        var track: UserTrack = .{};
+        track.id = id;
+        track.album = album_id;
+        track.number = number;
+        track.duration_ms = duration_ms;
+        track.setTitle(title);
+        track.setArtist(artist);
+        track.setPath(path);
+        model.user_tracks[model.user_track_count] = track;
+        model.user_track_count += 1;
         return true;
     }
 
@@ -1490,6 +1599,14 @@ fn formatMs(arena: std.mem.Allocator, ms: u32) []const u8 {
     return std.fmt.allocPrint(arena, "{d}:{d:0>2}", .{ total_seconds / 60, total_seconds % 60 }) catch "";
 }
 
+/// The library store is tab/newline delimited: a tag or edit carrying
+/// either would split its record on the next restore.
+fn scrubFieldSeparators(bytes: []u8) void {
+    for (bytes) |*byte| {
+        if (byte.* == '\t' or byte.* == '\n' or byte.* == '\r') byte.* = ' ';
+    }
+}
+
 fn lowestFreeId(used: *const std.StaticBitSet(256), first: u8) ?u8 {
     var id: usize = first;
     while (id < 256) : (id += 1) {
@@ -1559,6 +1676,7 @@ fn lessIgnoreCase(a: []const u8, b: []const u8) bool {
 }
 
 pub fn persistLibrary(model: *Model, fx: *Effects) void {
+    model.library_revision +%= 1;
     if (model.store_path_len == 0) return;
     if (model.store_write_inflight) {
         model.save_pending = true;
@@ -1677,16 +1795,16 @@ fn requestSessionLoad(model: *Model, fx: *Effects) void {
 fn playModeName(mode: PlayMode) []const u8 {
     return switch (mode) {
         .list_loop => "list_loop",
+        .single_loop => "single_loop",
+        .shuffle => "shuffle",
         .sequential => "sequential",
     };
 }
 
 fn parsePlayMode(name: []const u8) ?PlayMode {
     if (std.mem.eql(u8, name, "list_loop")) return .list_loop;
-    // Older sessions used both modes; preserve their safe wrapping
-    // behavior after the two-mode transport migration.
-    if (std.mem.eql(u8, name, "single_loop")) return .list_loop;
-    if (std.mem.eql(u8, name, "shuffle")) return .list_loop;
+    if (std.mem.eql(u8, name, "single_loop")) return .single_loop;
+    if (std.mem.eql(u8, name, "shuffle")) return .shuffle;
     if (std.mem.eql(u8, name, "sequential")) return .sequential;
     return null;
 }
@@ -1753,6 +1871,7 @@ fn copySourceToManagedPath(source: []const u8, dest: []const u8) bool {
 pub fn importAudioFromSource(model: *Model, album_id: u8, source: []const u8) bool {
     if (model.mediaDir().len == 0) return model.addUserTrackToAlbum(album_id, source);
     if (source.len == 0 or source.len > max_user_path) return false;
+    if (libraryHasFile(model, source)) return false;
     if (model.user_track_count >= max_user_tracks) return false;
     if (album_id == imported_album_id) {
         if (!model.ensureLibraryAlbum()) return false;
@@ -1824,6 +1943,159 @@ pub fn migrateExternalMedia(model: *Model) bool {
     return changed;
 }
 
+/// True when `source` is already in the library: the same path, or the
+/// same bytes as a managed copy. Managed copies are renamed `t{id}`, so
+/// comparing paths alone let the same file be imported again and again.
+fn libraryHasFile(model: *const Model, source: []const u8) bool {
+    if (model.pathAlreadyImported(source)) return true;
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const size = fileSizeAt(io, source) orelse return false;
+    for (model.user_tracks[0..model.user_track_count]) |*track| {
+        const other = fileSizeAt(io, track.path()) orelse continue;
+        if (other != size) continue;
+        if (sameFileContents(io, source, track.path())) return true;
+    }
+    return false;
+}
+
+fn fileSizeAt(io: std.Io, path: []const u8) ?u64 {
+    if (!std.fs.path.isAbsolute(path)) return null;
+    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer file.close(io);
+    const stat = file.stat(io) catch return null;
+    return stat.size;
+}
+
+fn sameFileContents(io: std.Io, a_path: []const u8, b_path: []const u8) bool {
+    var a = std.Io.Dir.openFileAbsolute(io, a_path, .{}) catch return false;
+    defer a.close(io);
+    var b = std.Io.Dir.openFileAbsolute(io, b_path, .{}) catch return false;
+    defer b.close(io);
+    var a_buffer: [4096]u8 = undefined;
+    var b_buffer: [4096]u8 = undefined;
+    var a_reader = a.reader(io, &a_buffer);
+    var b_reader = b.reader(io, &b_buffer);
+    var a_chunk: [16 * 1024]u8 = undefined;
+    var b_chunk: [16 * 1024]u8 = undefined;
+    while (true) {
+        const a_len = a_reader.interface.readSliceShort(&a_chunk) catch return false;
+        const b_len = b_reader.interface.readSliceShort(&b_chunk) catch return false;
+        if (a_len != b_len) return false;
+        if (!std.mem.eql(u8, a_chunk[0..a_len], b_chunk[0..b_len])) return false;
+        if (a_len < a_chunk.len) return true;
+    }
+}
+
+/// Add a picked file to the library. Without a media dir (unit tests)
+/// it registers in place, synchronously; otherwise it queues a
+/// background copy. False when it is a duplicate or the library (plus
+/// the queue) is full.
+pub fn queueImport(model: *Model, album_id: u8, source: []const u8) bool {
+    if (model.mediaDir().len == 0) return importAudioFromSource(model, album_id, source);
+    if (source.len == 0 or source.len > max_user_path) return false;
+    const waiting = model.import_len - model.import_head;
+    if (model.user_track_count + waiting >= max_user_tracks) return false;
+    if (model.import_len >= max_user_tracks) return false;
+    for (model.import_jobs[model.import_head..model.import_len]) |*job| {
+        if (std.mem.eql(u8, job.source(), source)) return false;
+    }
+    if (libraryHasFile(model, source)) return false;
+    const job = &model.import_jobs[model.import_len];
+    job.* = .{ .album_id = album_id };
+    @memcpy(job.source_storage[0..source.len], source);
+    job.source_len = source.len;
+    model.import_len += 1;
+    model.import_total += 1;
+    return true;
+}
+
+/// Start the next background copy when none is running; when the queue
+/// has drained, tidy up and reset progress.
+pub fn pumpImport(model: *Model, fx: *Effects) void {
+    while (model.import_inflight_id == null and model.import_head < model.import_len) {
+        if (startImportCopy(model, fx, &model.import_jobs[model.import_head])) return;
+        model.import_head += 1;
+        model.import_done += 1;
+    }
+    if (model.import_inflight_id == null) finishImport(model, fx);
+}
+
+fn startImportCopy(model: *Model, fx: *Effects, job: *const ImportJob) bool {
+    if (model.user_track_count >= max_user_tracks) return false;
+    if (job.album_id == imported_album_id) {
+        if (!model.ensureLibraryAlbum()) return false;
+    } else if (model.userAlbumById(job.album_id) == null) {
+        return false;
+    }
+    const id = model.freeTrackId() orelse return false;
+    var dest_buf: [max_user_path]u8 = undefined;
+    const dest = mediaDestPath(model, 't', id, job.source(), &dest_buf) orelse return false;
+    if (!ensureMediaDir(model)) return false;
+    fx.spawn(.{
+        .key = import_spawn_key,
+        .argv = &.{ "/bin/cp", "-f", "--", job.source(), dest },
+        .output = .collect,
+        .on_exit = Effects.exitMsg(.import_copied),
+    });
+    model.import_inflight_id = id;
+    return true;
+}
+
+fn ensureMediaDir(model: *const Model) bool {
+    const root = model.mediaDir();
+    if (!std.fs.path.isAbsolute(root)) return false;
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    std.Io.Dir.cwd().createDirPath(threaded.io(), root) catch return false;
+    return true;
+}
+
+/// The head job's copy exited: register the track on success, discard
+/// the partial copy otherwise, then move on to the next job.
+fn finishImportCopy(model: *Model, fx: *Effects, exit: native_sdk.EffectExit) void {
+    if (exit.key != import_spawn_key) return;
+    const id = model.import_inflight_id orelse return;
+    model.import_inflight_id = null;
+    const job = &model.import_jobs[model.import_head];
+    model.import_head += 1;
+    model.import_done += 1;
+    var dest_buf: [max_user_path]u8 = undefined;
+    if (mediaDestPath(model, 't', id, job.source(), &dest_buf)) |dest| {
+        const copied = exit.reason == .exited and exit.code == 0;
+        if (copied and model.insertUserTrack(id, job.album_id, dest, job.source())) {
+            // Persist per track so a quit mid-import keeps what landed.
+            persistLibrary(model, fx);
+        } else {
+            deleteManagedMediaFile(model, dest);
+        }
+    }
+    pumpImport(model, fx);
+}
+
+fn finishImport(model: *Model, fx: *Effects) void {
+    if (model.import_total == 0) return;
+    // An album whose every copy failed (or a Library album created for a
+    // batch that never landed) would sit hidden and hold a slot.
+    var removed = false;
+    var i: usize = 0;
+    while (i < model.user_album_count) {
+        const id = model.user_albums[i].id;
+        if (model.tracksInAlbum(id) == 0) {
+            model.removeUserAlbum(id);
+            removed = true;
+        } else {
+            i += 1;
+        }
+    }
+    if (removed) persistLibrary(model, fx);
+    model.import_head = 0;
+    model.import_len = 0;
+    model.import_total = 0;
+    model.import_done = 0;
+}
+
 fn pickAndImportMusic(model: *Model, fx: *Effects) void {
     const services = fx.services orelse return;
     var buffer: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
@@ -1841,10 +2113,10 @@ fn pickAndImportMusic(model: *Model, fx: *Effects) void {
     while (paths.next()) |path| {
         const trimmed = std.mem.trim(u8, path, " \r");
         if (trimmed.len == 0) continue;
-        if (model.user_track_count >= max_user_tracks) break;
-        if (importAudioFromSource(model, imported_album_id, trimmed)) added += 1;
+        if (queueImport(model, imported_album_id, trimmed)) added += 1;
     }
     if (added > 0) persistLibrary(model, fx);
+    pumpImport(model, fx);
 }
 
 fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
@@ -1924,9 +2196,8 @@ fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
 
     var added: u32 = 0;
     for (order[0..audio_count]) |idx| {
-        if (model.user_track_count >= max_user_tracks) break;
         const path = audio_paths[idx][0..audio_lens[idx]];
-        if (importAudioFromSource(model, album_id, path)) added += 1;
+        if (queueImport(model, album_id, path)) added += 1;
     }
 
     if (added == 0) {
@@ -1940,9 +2211,12 @@ fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
         }
     }
 
+    // Rows appear as their copies land; an album whose every copy fails
+    // is dropped when the queue drains.
     model.open_album = album_id;
     model.detail_scroll = 0;
     persistLibrary(model, fx);
+    pumpImport(model, fx);
 }
 
 fn pickAndSetCover(model: *Model, fx: *Effects, album_id: u8) void {
@@ -1974,9 +2248,8 @@ fn requestCoverLoad(model: *Model, fx: *Effects, album_id: u8) void {
 }
 
 /// True when any catalog string needs a CJK-capable face. Used at boot
-/// to skip the ~7 MiB system face for Latin-only libraries. Late imports
-/// cannot register a font after the installing frame — relaunch picks
-/// them up.
+/// to skip the system CJK face for Latin-only libraries, and after
+/// each catalog change to register it late (main.zig `HostShim`).
 pub fn libraryNeedsCjkFont(model: *const Model) bool {
     for (model.user_albums[0..model.user_album_count]) |*album| {
         if (textHasCjk(album.title())) return true;
@@ -2324,6 +2597,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const track = model.userTrackInAlbumByNumber(id, number) orelse continue;
                 model.pushQueue(track.id);
             }
+            if (model.play_mode == .shuffle) {
+                // A new list starts a new pass at a random track.
+                resetShuffle(model);
+                const ids = model.queue[0..model.queue_len];
+                if (pickUnplayed(model, ids, null)) |pick| {
+                    startTrack(model, fx, pick);
+                    return;
+                }
+            }
             startTrack(model, fx, first);
         },
         .play_track => |id| playOrToggle(model, fx, id),
@@ -2351,9 +2633,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .prev_track => previous(model, fx),
         .cycle_play_mode => {
             model.play_mode = switch (model.play_mode) {
-                .list_loop => .sequential,
+                .list_loop => .single_loop,
+                .single_loop => .shuffle,
+                .shuffle => .sequential,
                 .sequential => .list_loop,
             };
+            if (model.play_mode == .shuffle) resetShuffle(model);
             persistSession(model, fx);
         },
         .volume_changed => |value| {
@@ -2380,6 +2665,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .media_command => |cmd| switch (cmd) {
             .toggle_play => update(model, .toggle_play, fx),
+            .play => if (!model.playing) update(model, .toggle_play, fx),
+            .pause => if (model.playing) update(model, .toggle_play, fx),
             .next => update(model, .next_track, fx),
             .previous => update(model, .prev_track, fx),
         },
@@ -2443,6 +2730,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (!model.cover_hydrate_pending) return;
             hydrateNextCover(model, fx);
         },
+        .import_copied => |exit| finishImportCopy(model, fx, exit),
         .library_done => |result| switch (result.op) {
             // Launch loads the library sync; async reads are unused.
             .read => {},
@@ -2637,6 +2925,7 @@ fn syncAudioPollTimer(model: *Model, fx: *Effects) void {
         });
     } else {
         fx.cancelTimer(audio_poll_timer_key);
+        fx.cancelTimer(audio_end_timer_key);
     }
 }
 
@@ -2689,10 +2978,26 @@ fn pollAudioChannel(model: *Model, fx: *Effects) void {
         if (position > model.elapsed_ms or model.elapsed_ms - position > position_snap_slack_ms) {
             model.elapsed_ms = position;
         }
+        armEndPoll(model, fx, position);
     } else {
         model.elapsed_ms = position;
     }
     syncNowPlaying(model);
+}
+
+/// When the track ends before the next regular poll, schedule a one-shot
+/// poll just past the end so the next track starts without a gap.
+fn armEndPoll(model: *const Model, fx: *Effects, position_ms: u32) void {
+    const duration = model.now_duration_ms;
+    if (duration == 0) return;
+    const remaining: u64 = if (duration > position_ms) duration - position_ms else 0;
+    if (remaining >= audio_poll_interval_ms) return;
+    fx.startTimer(.{
+        .key = audio_end_timer_key,
+        .interval_ms = remaining + audio_end_margin_ms,
+        .mode = .one_shot,
+        .on_fire = Effects.timerMsg(.audio_poll),
+    });
 }
 
 /// Journal/test path: advance the rendered clock by the real frame
@@ -2715,6 +3020,8 @@ fn advanceRenderedClock(model: *Model, frame: FrameClock) void {
 
 fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     const track = model.resolveTrack(track_id) orelse return;
+    // The previous track's end poll would only land a wasted poll.
+    fx.cancelTimer(audio_end_timer_key);
     model.now = track_id;
     // Starting a track selects it: the playing row is the current row
     // for the arrow keys and the inverted accent register alike.
@@ -2811,6 +3118,16 @@ fn onTrackCompleted(model: *Model, fx: *Effects) void {
 /// the end of sequential playback (stop) from a mid-track skip on the
 /// last song (no-op).
 fn skipForward(model: *Model, fx: *Effects, from_completion: bool) void {
+    if (from_completion and model.play_mode == .single_loop) {
+        if (model.now) |now_id| {
+            startTrack(model, fx, now_id);
+            return;
+        }
+    }
+    if (model.play_mode == .shuffle) {
+        shuffleForward(model, fx);
+        return;
+    }
     if (model.now) |now_id| {
         if (model.queueIndexOf(now_id)) |idx| {
             advanceWithinPlaylist(model, fx, idx, from_completion);
@@ -2826,7 +3143,7 @@ fn skipForward(model: *Model, fx: *Effects, from_completion: bool) void {
     if (count == 0) return;
 
     switch (model.play_mode) {
-        .list_loop => {
+        .list_loop, .single_loop, .shuffle => {
             const next_number: u8 = @intCast((@as(usize, track.number) % count) + 1);
             const next = model.userTrackInAlbumByNumber(track.album, next_number) orelse return;
             startTrack(model, fx, next.id);
@@ -2846,7 +3163,7 @@ fn advanceWithinPlaylist(model: *Model, fx: *Effects, idx: usize, from_completio
     const len = model.queue_len;
     if (len == 0) return;
     switch (model.play_mode) {
-        .list_loop => {
+        .list_loop, .single_loop, .shuffle => {
             const next = (idx + 1) % len;
             startTrack(model, fx, model.queue[next]);
         },
@@ -2858,6 +3175,93 @@ fn advanceWithinPlaylist(model: *Model, fx: *Effects, idx: usize, from_completio
             startTrack(model, fx, model.queue[idx + 1]);
         },
     }
+}
+
+/// The list shuffle draws from: the playlist when the current track is in
+/// it (or nothing is loaded), else the current track's album in order.
+fn shuffleCandidates(model: *const Model, out: *[max_queue]u8) []const u8 {
+    const now_id = model.now orelse return model.queue[0..model.queue_len];
+    if (model.queueIndexOf(now_id) != null) return model.queue[0..model.queue_len];
+    const track = model.userTrackById(now_id) orelse return model.queue[0..model.queue_len];
+    var len: usize = 0;
+    var number: u8 = 1;
+    const count = model.tracksInAlbum(track.album);
+    while (number <= count) : (number += 1) {
+        const user = model.userTrackInAlbumByNumber(track.album, number) orelse continue;
+        out[len] = user.id;
+        len += 1;
+    }
+    return out[0..len];
+}
+
+fn resetShuffle(model: *Model) void {
+    model.shuffle_played = std.StaticBitSet(256).initEmpty();
+    model.shuffle_history_len = 0;
+}
+
+/// splitmix64: tiny, well-distributed, and fully determined by the model.
+fn nextRandom(model: *Model) u64 {
+    model.shuffle_rng +%= 0x9E3779B97F4A7C15;
+    var z = model.shuffle_rng;
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+    return z ^ (z >> 31);
+}
+
+/// A uniformly random id from `ids` not yet played this pass and not
+/// `exclude`; null when none is left.
+fn pickUnplayed(model: *Model, ids: []const u8, exclude: ?u8) ?u8 {
+    var count: usize = 0;
+    for (ids) |id| {
+        if (exclude != null and exclude.? == id) continue;
+        if (!model.shuffle_played.isSet(id)) count += 1;
+    }
+    if (count == 0) return null;
+    var target = nextRandom(model) % count;
+    for (ids) |id| {
+        if (exclude != null and exclude.? == id) continue;
+        if (model.shuffle_played.isSet(id)) continue;
+        if (target == 0) return id;
+        target -= 1;
+    }
+    return null;
+}
+
+fn pushShuffleHistory(model: *Model, id: u8) void {
+    if (model.shuffle_history_len == shuffle_history_cap) {
+        std.mem.copyForwards(u8, model.shuffle_history[0 .. shuffle_history_cap - 1], model.shuffle_history[1..]);
+        model.shuffle_history_len -= 1;
+    }
+    model.shuffle_history[model.shuffle_history_len] = id;
+    model.shuffle_history_len += 1;
+}
+
+/// Shuffle's Next and natural advance. Play Next entries outside the
+/// playlist still go first; otherwise a random unplayed track from the
+/// current list, starting a new pass (never the same track twice in a
+/// row when there is a choice) once every track has played.
+fn shuffleForward(model: *Model, fx: *Effects) void {
+    const now_in_playlist = if (model.now) |id| model.queueIndexOf(id) != null else false;
+    if (!now_in_playlist and model.now != null) {
+        if (model.popQueue()) |queued| {
+            if (model.now) |id| pushShuffleHistory(model, id);
+            startTrack(model, fx, queued);
+            return;
+        }
+    }
+    var buf: [max_queue]u8 = undefined;
+    const ids = shuffleCandidates(model, &buf);
+    if (ids.len == 0) return;
+    if (model.now) |id| model.shuffle_played.set(id);
+    var pick = pickUnplayed(model, ids, model.now);
+    if (pick == null) {
+        for (ids) |id| model.shuffle_played.unset(id);
+        if (model.now) |id| model.shuffle_played.set(id);
+        pick = pickUnplayed(model, ids, model.now) orelse model.now;
+    }
+    const next = pick orelse return;
+    if (model.now) |id| pushShuffleHistory(model, id);
+    startTrack(model, fx, next);
 }
 
 fn stopAtEnd(model: *Model) void {
@@ -2878,6 +3282,15 @@ fn previous(model: *Model, fx: *Effects) void {
         fx.seekAudio(0);
         syncNowPlaying(model);
         return;
+    }
+    if (model.play_mode == .shuffle) {
+        while (model.shuffle_history_len > 0) {
+            model.shuffle_history_len -= 1;
+            const id = model.shuffle_history[model.shuffle_history_len];
+            if (model.userTrackById(id) == null) continue;
+            startTrack(model, fx, id);
+            return;
+        }
     }
     if (model.queueIndexOf(track.id)) |idx| {
         if (model.play_mode == .sequential and idx == 0) {

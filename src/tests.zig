@@ -589,6 +589,12 @@ test "play mode cycles between list loop and sequential" {
     try testing.expectEqual(model_mod.PlayMode.list_loop, model.play_mode);
     try testing.expectEqualStrings("repeat", model.playModeIcon());
     apply(&model, .cycle_play_mode);
+    try testing.expectEqual(model_mod.PlayMode.single_loop, model.play_mode);
+    try testing.expectEqualStrings("app:repeat-one", model.playModeIcon());
+    apply(&model, .cycle_play_mode);
+    try testing.expectEqual(model_mod.PlayMode.shuffle, model.play_mode);
+    try testing.expectEqualStrings("shuffle", model.playModeIcon());
+    apply(&model, .cycle_play_mode);
     try testing.expectEqual(model_mod.PlayMode.sequential, model.play_mode);
     try testing.expectEqualStrings("app:sequential", model.playModeIcon());
     apply(&model, .cycle_play_mode);
@@ -1123,4 +1129,279 @@ test "oversized cover downscales into the canvas image slot" {
     const info = live.harness.runtime.registeredCanvasImage(album_id).?;
     try testing.expectEqual(@as(usize, model_mod.max_cover_register_edge), info.width);
     try testing.expectEqual(@as(usize, model_mod.max_cover_register_edge), info.height);
+}
+
+fn pendingTimer(fx: *model_mod.Effects, key: u64) ?u64 {
+    var i: usize = 0;
+    while (i < fx.pendingTimerCount()) : (i += 1) {
+        const timer = fx.pendingTimerAt(i) orelse continue;
+        if (timer.key == key) return timer.interval_ms;
+    }
+    return null;
+}
+
+test "a poll near the end of a track schedules a follow-up poll just past it" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/wellmusic-test/end.mp3"));
+    model.user_tracks[0].duration_ms = 10_000;
+    const id = model.user_tracks[0].id;
+    applyFx(&model, .{ .play_track = id }, &fx);
+
+    fx.audio.active = true;
+    fx.audio.key = id;
+    fx.audio.playing = true;
+    fx.audio.duration_ms = 10_000;
+
+    // Far from the end: the regular 2 s cadence is enough.
+    fx.audio.position_ms = 3_000;
+    applyFx(&model, .{ .audio_poll = .{ .key = model_mod.audio_poll_timer_key } }, &fx);
+    try testing.expectEqual(@as(?u64, null), pendingTimer(&fx, model_mod.audio_end_timer_key));
+
+    // Inside the last interval: a one-shot lands right after the end.
+    fx.audio.position_ms = 9_000;
+    applyFx(&model, .{ .audio_poll = .{ .key = model_mod.audio_poll_timer_key } }, &fx);
+    try testing.expectEqual(@as(?u64, 1_000 + model_mod.audio_end_margin_ms), pendingTimer(&fx, model_mod.audio_end_timer_key));
+
+    // Pausing drops it with the regular poll.
+    applyFx(&model, .toggle_play, &fx);
+    try testing.expectEqual(@as(?u64, null), pendingTimer(&fx, model_mod.audio_end_timer_key));
+}
+
+/// Deliver every completed effect Msg, the way the runtime would.
+fn drainFx(model: *Model, fx: *model_mod.Effects) void {
+    while (fx.takeMsg()) |msg| applyFx(model, msg, fx);
+}
+
+fn writeTestFile(io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var file = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, bytes);
+}
+
+test "importing the same file twice is rejected even under another name" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const source = "/tmp/wellmusic-dup-source.mp3";
+    const renamed = "/tmp/wellmusic-dup-renamed.mp3";
+    const other = "/tmp/wellmusic-dup-other.mp3";
+    try writeTestFile(io, source, "ID3same-bytes");
+    defer std.Io.Dir.deleteFileAbsolute(io, source) catch {};
+    try writeTestFile(io, renamed, "ID3same-bytes");
+    defer std.Io.Dir.deleteFileAbsolute(io, renamed) catch {};
+    try writeTestFile(io, other, "ID3diff-bytes");
+    defer std.Io.Dir.deleteFileAbsolute(io, other) catch {};
+
+    var model = Model{};
+    model.setMediaDir("/tmp/wellmusic-dup-media");
+    try testing.expect(model_mod.importAudioFromSource(&model, model_mod.imported_album_id, source));
+    try testing.expect(!model_mod.importAudioFromSource(&model, model_mod.imported_album_id, source));
+    try testing.expect(!model_mod.importAudioFromSource(&model, model_mod.imported_album_id, renamed));
+    // Same size, different bytes: a different song.
+    try testing.expect(model_mod.importAudioFromSource(&model, model_mod.imported_album_id, other));
+    try testing.expectEqual(@as(usize, 2), model.user_track_count);
+    while (model.user_track_count > 0) _ = model.removeUserTrack(model.user_tracks[0].id);
+}
+
+test "background import copies through a spawn and reports progress" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const good = "/tmp/wellmusic-bg-good.mp3";
+    const bad = "/tmp/wellmusic-bg-bad.mp3";
+    try writeTestFile(io, good, "ID3good");
+    defer std.Io.Dir.deleteFileAbsolute(io, good) catch {};
+    try writeTestFile(io, bad, "ID3bad!");
+    defer std.Io.Dir.deleteFileAbsolute(io, bad) catch {};
+
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var model = Model{};
+    model.setMediaDir("/tmp/wellmusic-bg-media");
+    const album = model.addUserAlbum("Folder", "Artist").?;
+    try testing.expect(model_mod.queueImport(&model, album, good));
+    try testing.expect(model_mod.queueImport(&model, album, bad));
+    try testing.expect(!model_mod.queueImport(&model, album, good)); // already queued
+    model_mod.pumpImport(&model, &fx);
+
+    // Nothing lands until the copy exits; the UI shows progress.
+    try testing.expectEqual(@as(usize, 0), model.user_track_count);
+    try testing.expectEqualStrings("Importing 1 / 2…", model.importStatus(arena));
+    const first = fx.pendingSpawnAt(0).?;
+    try testing.expectEqualStrings("/bin/cp", first.argv[0]);
+    try testing.expectEqualStrings(good, first.argv[3]);
+    // Stand in for cp, then report success.
+    try writeTestFile(io, first.argv[4], "ID3good");
+    const dest = try testing.allocator.dupe(u8, first.argv[4]);
+    defer testing.allocator.free(dest);
+    try fx.feedExit(model_mod.import_spawn_key, 0);
+    drainFx(&model, &fx);
+    try testing.expectEqual(@as(usize, 1), model.user_track_count);
+    try testing.expectEqualStrings(dest, model.user_tracks[0].path());
+    try testing.expectEqualStrings("Importing 2 / 2…", model.importStatus(arena));
+
+    // The second copy fails: no track, and the queue drains.
+    try fx.feedExit(model_mod.import_spawn_key, 1);
+    drainFx(&model, &fx);
+    try testing.expectEqual(@as(usize, 1), model.user_track_count);
+    try testing.expectEqualStrings("", model.importStatus(arena));
+    try testing.expect(model.userAlbumById(album) != null);
+    _ = model.removeUserTrack(model.user_tracks[0].id);
+}
+
+test "a folder import whose every copy fails leaves no empty album" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var model = Model{};
+    model.setMediaDir("/tmp/wellmusic-bg-media");
+    const album = model.addUserAlbum("Broken", "Artist").?;
+    try testing.expect(model_mod.queueImport(&model, album, "/tmp/wellmusic-bg-missing.mp3"));
+    model_mod.pumpImport(&model, &fx);
+    try fx.feedExit(model_mod.import_spawn_key, 1);
+    drainFx(&model, &fx);
+    try testing.expect(model.userAlbumById(album) == null);
+}
+
+test "titles cannot carry the store's field separators" {
+    var track: model_mod.UserTrack = .{};
+    track.setTitle("a\tb\nc\rd");
+    try testing.expectEqualStrings("a b c d", track.title());
+}
+
+test "one malformed library record is skipped, not the whole library" {
+    var model: Model = .{};
+    const bytes = model_mod.library_store_header ++ "\n" ++
+        "album\t1\tLibrary\tMy Music\t2026\t\n" ++
+        "track\t1\t1\t1\tFirst\t\t/Music/1.mp3\t0\n" ++
+        "track\t2\t1\t2\tBroken\n" ++
+        "track\t3\t1\t3\tThird\t\t/Music/3.mp3\t0\n" ++
+        "track\t3\t1\t4\tDuplicate id\t\t/Music/4.mp3\t0\n";
+    try testing.expect(model.restoreLibrary(bytes));
+    try testing.expectEqual(@as(usize, 2), model.user_track_count);
+    // Numbering closes the gap so the album lists both rows.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const rows = model.albumTrackRows(arena_state.allocator(), model_mod.imported_album_id);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("Third", rows[1].title);
+}
+
+fn seedAlbum(model: *Model, count: usize) !u8 {
+    const album = model.addUserAlbum("Shuffle Test", "Artist").?;
+    var path_buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const path = try std.fmt.bufPrint(&path_buf, "/tmp/demo/mode-{d}.mp3", .{i});
+        try testing.expect(model.addUserTrackToAlbum(album, path));
+    }
+    return album;
+}
+
+test "single loop repeats the track at its end but Next still moves on" {
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 3);
+    apply(&model, .{ .play_album = album });
+    const first = model.now.?;
+    model.play_mode = .single_loop;
+
+    apply(&model, .{ .audio_event = .{ .key = first, .kind = .completed } });
+    try testing.expectEqual(@as(?u8, first), model.now);
+    try testing.expect(model.playing);
+
+    apply(&model, .next_track);
+    try testing.expectEqual(@as(?u8, model.queue[1]), model.now);
+}
+
+test "shuffle plays every track once before any repeats, and Previous retraces" {
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 6);
+    model.play_mode = .shuffle;
+    apply(&model, .{ .play_album = album });
+
+    var seen = std.StaticBitSet(256).initEmpty();
+    var order: [6]u8 = undefined;
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        const now = model.now.?;
+        try testing.expect(!seen.isSet(now));
+        seen.set(now);
+        order[i] = now;
+        apply(&model, .{ .audio_event = .{ .key = now, .kind = .completed } });
+    }
+    // Seventh pick opens a new pass and never repeats the last track.
+    try testing.expect(model.now.? != order[5]);
+    try testing.expect(model.playing);
+
+    // Previous walks back through what actually played.
+    apply(&model, .prev_track);
+    try testing.expectEqual(@as(?u8, order[5]), model.now);
+    apply(&model, .prev_track);
+    try testing.expectEqual(@as(?u8, order[4]), model.now);
+}
+
+test "shuffle order depends on the seed, not on the album order" {
+    var orders: [2][5]u8 = undefined;
+    for (&orders, [_]u64{ 1, 2 }) |*out, seed| {
+        var model: Model = .{};
+        model.shuffle_rng = seed;
+        const album = try seedAlbum(&model, 5);
+        model.play_mode = .shuffle;
+        apply(&model, .{ .play_album = album });
+        for (out) |*slot| {
+            slot.* = model.now.?;
+            apply(&model, .next_track);
+        }
+    }
+    try testing.expect(!std.mem.eql(u8, &orders[0], &orders[1]));
+}
+
+test "new play modes survive a session round trip" {
+    for ([_]model_mod.PlayMode{ .single_loop, .shuffle }) |mode| {
+        var model: Model = .{};
+        model.play_mode = mode;
+        var buffer: [model_mod.max_session_store_bytes]u8 = undefined;
+        const bytes = model.serializeSession(&buffer);
+        var restored: Model = .{};
+        try testing.expect(restored.restoreSession(bytes));
+        try testing.expectEqual(mode, restored.play_mode);
+    }
+}
+
+test "remote play and pause never toggle the wrong way" {
+    try testing.expectEqual(Msg{ .media_command = .play }, main.onCommand("transport.play").?);
+    try testing.expectEqual(Msg{ .media_command = .pause }, main.onCommand("transport.pause").?);
+
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/demo/remote.mp3"));
+    apply(&model, .{ .media_command = .pause });
+    try testing.expect(!model.playing);
+    apply(&model, .{ .media_command = .play });
+    try testing.expect(model.playing);
+    apply(&model, .{ .media_command = .play });
+    try testing.expect(model.playing);
+    apply(&model, .{ .media_command = .pause });
+    try testing.expect(!model.playing);
+    apply(&model, .{ .media_command = .pause });
+    try testing.expect(!model.playing);
+}
+
+test "every catalog save bumps the library revision" {
+    var model: Model = .{};
+    const before = model.library_revision;
+    try testing.expect(model.addUserTrack("/tmp/demo/rev.mp3"));
+    apply(&model, .{ .edit_track = model.user_tracks[0].id });
+    model.edit_title_buffer.set("夜曲");
+    apply(&model, .save_edit_track);
+    try testing.expect(model.library_revision != before);
+    try testing.expect(model_mod.libraryNeedsCjkFont(&model));
 }

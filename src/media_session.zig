@@ -1,11 +1,16 @@
-//! macOS Now Playing info bridge (best-effort).
+//! macOS Now Playing bridge (best-effort).
 //!
 //! Native SDK hosts do not expose MPNowPlayingInfoCenter yet. This module
 //! updates Now Playing metadata through MediaPlayer via dlopen+dlsym so
-//! tests never need to link objc. Remote-command targets are intentionally
-//! omitted — `objc_msgSend` ABI for `addTarget:action:` is fragile without
-//! a real ObjC bridge; transport control rides the status-item menu,
-//! projection commands, and focused media keys instead.
+//! tests never need to link objc.
+//!
+//! Remote commands (Control Center, headphone buttons, media keys while
+//! another app is focused) go through MPRemoteCommandCenter's
+//! `addTarget:action:` with a tiny NSObject subclass built at runtime
+//! (`objc_allocateClassPair` + `class_addMethod`): the targets are plain
+//! C functions, so no block ABI is involved. A handler only records the
+//! command and wakes the host loop; main.zig then delivers it as the same
+//! `.command` event the status-item menu sends.
 //!
 //! On arm64, `objc_msgSend` must NOT be called as a C varargs function:
 //! variadic args go on the stack while the real method expects registers.
@@ -125,6 +130,131 @@ pub fn clear() void {
     last_publish = .{};
     if (!installed) return;
     macClear();
+}
+
+/// Transport commands the system can send. The tag is the bit index in
+/// `pending_remote`.
+pub const RemoteCommand = enum(u3) {
+    toggle_play,
+    play,
+    pause,
+    next,
+    previous,
+
+    /// The status-item command name `onCommand` already maps.
+    pub fn commandName(command: RemoteCommand) []const u8 {
+        return switch (command) {
+            .toggle_play => "transport.toggle",
+            .play => "transport.play",
+            .pause => "transport.pause",
+            .next => "transport.next",
+            .previous => "transport.previous",
+        };
+    }
+};
+
+/// Commands received but not yet delivered, one bit per command. A burst
+/// of the same command collapses to one — the loop drains on wake.
+var pending_remote: std.atomic.Value(u8) = .init(0);
+var remote_wake: ?*const fn () void = null;
+var remote_installed: bool = false;
+
+/// Register the remote-command targets once. `wake` must be safe to call
+/// from the main thread inside an AppKit callback; it nudges the host
+/// loop so an idle app still reacts to Control Center at once.
+pub fn installRemoteCommands(wake: *const fn () void) void {
+    if (comptime builtin.os.tag != .macos) return;
+    if (comptime builtin.is_test) return;
+    if (remote_installed) return;
+    remote_installed = true;
+    remote_wake = wake;
+    ensureInstalled();
+    macInstallRemoteCommands();
+}
+
+/// The next command the system sent since the last call, if any.
+pub fn takeRemoteCommand() ?RemoteCommand {
+    while (true) {
+        const bits = pending_remote.load(.acquire);
+        if (bits == 0) return null;
+        const index: u3 = @intCast(@ctz(bits));
+        const cleared = bits & ~(@as(u8, 1) << index);
+        if (pending_remote.cmpxchgWeak(bits, cleared, .acq_rel, .acquire) == null) {
+            return @enumFromInt(index);
+        }
+    }
+}
+
+fn noteRemote(command: RemoteCommand) isize {
+    _ = pending_remote.fetchOr(@as(u8, 1) << @intFromEnum(command), .acq_rel);
+    if (remote_wake) |wake| wake();
+    return 0; // MPRemoteCommandHandlerStatusSuccess
+}
+
+fn handleToggle(_: Id, _: Sel, _: Id) callconv(.c) isize {
+    return noteRemote(.toggle_play);
+}
+fn handlePlay(_: Id, _: Sel, _: Id) callconv(.c) isize {
+    return noteRemote(.play);
+}
+fn handlePause(_: Id, _: Sel, _: Id) callconv(.c) isize {
+    return noteRemote(.pause);
+}
+fn handleNext(_: Id, _: Sel, _: Id) callconv(.c) isize {
+    return noteRemote(.next);
+}
+fn handlePrevious(_: Id, _: Sel, _: Id) callconv(.c) isize {
+    return noteRemote(.previous);
+}
+
+const RemoteHandler = struct {
+    /// MPRemoteCommandCenter property holding the command.
+    getter: [*:0]const u8,
+    /// Selector added to the target class for this command.
+    selector: [*:0]const u8,
+    imp: *const fn (Id, Sel, Id) callconv(.c) isize,
+};
+
+const remote_handlers = [_]RemoteHandler{
+    .{ .getter = "togglePlayPauseCommand", .selector = "wellmusicToggle:", .imp = &handleToggle },
+    .{ .getter = "playCommand", .selector = "wellmusicPlay:", .imp = &handlePlay },
+    .{ .getter = "pauseCommand", .selector = "wellmusicPause:", .imp = &handlePause },
+    .{ .getter = "nextTrackCommand", .selector = "wellmusicNext:", .imp = &handleNext },
+    .{ .getter = "previousTrackCommand", .selector = "wellmusicPrevious:", .imp = &handlePrevious },
+};
+
+fn macInstallRemoteCommands() void {
+    if (objc_fns == null) return;
+    var lib = objc_lib orelse return;
+    const allocate_class = lib.lookup(*const fn (superclass: Id, name: [*:0]const u8, extra: usize) callconv(.c) Id, "objc_allocateClassPair") orelse return;
+    const register_class = lib.lookup(*const fn (class: Id) callconv(.c) void, "objc_registerClassPair") orelse return;
+    const add_method = lib.lookup(*const fn (class: Id, name: Sel, imp: *const anyopaque, types: [*:0]const u8) callconv(.c) bool, "class_addMethod") orelse return;
+
+    const pool = pushAutoreleasePool();
+    defer popAutoreleasePool(pool);
+
+    const target_class = cls("WellMusicRemoteTarget") orelse blk: {
+        const base = cls("NSObject") orelse return;
+        const class = allocate_class(base, "WellMusicRemoteTarget", 0) orelse return;
+        // "q@:@": NSInteger return, self, _cmd, MPRemoteCommandEvent *.
+        for (remote_handlers) |handler| {
+            _ = add_method(class, sel(handler.selector), @ptrCast(handler.imp), "q@:@");
+        }
+        register_class(class);
+        break :blk class;
+    };
+    // +1 from alloc/init, deliberately never released: the target must
+    // outlive every command the system can still send.
+    const target = msg(msg(target_class, "alloc"), "init") orelse return;
+    const center_class = cls("MPRemoteCommandCenter") orelse return;
+    const center = msg(center_class, "sharedCommandCenter") orelse return;
+    const set_enabled: *const fn (Id, Sel, bool) callconv(.c) void = @ptrCast(objc_fns.?.msg_send);
+    const add_target: *const fn (Id, Sel, Id, Sel) callconv(.c) Id = @ptrCast(objc_fns.?.msg_send);
+    for (remote_handlers) |handler| {
+        const command = msg(center, handler.getter) orelse continue;
+        set_enabled(command, sel("setEnabled:"), true);
+        _ = add_target(command, sel("addTarget:action:"), target, sel(handler.selector));
+    }
 }
 
 fn ensureInstalled() void {
@@ -321,6 +451,17 @@ fn numberSeconds(ms: u32) Id {
 fn numberRate(rate: f64) Id {
     const ns = cls("NSNumber") orelse return null;
     return msgDouble(ns, "numberWithDouble:", rate);
+}
+
+test "remote commands queue once each and drain in a stable order" {
+    try std.testing.expectEqual(@as(?RemoteCommand, null), takeRemoteCommand());
+    _ = noteRemote(.next);
+    _ = noteRemote(.toggle_play);
+    _ = noteRemote(.next); // a burst of the same command collapses
+    try std.testing.expectEqual(@as(?RemoteCommand, .toggle_play), takeRemoteCommand());
+    try std.testing.expectEqual(@as(?RemoteCommand, .next), takeRemoteCommand());
+    try std.testing.expectEqual(@as(?RemoteCommand, null), takeRemoteCommand());
+    try std.testing.expectEqualStrings("transport.pause", RemoteCommand.pause.commandName());
 }
 
 test "utf8TruncateLen keeps ASCII under the cap" {

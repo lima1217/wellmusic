@@ -35,7 +35,7 @@
       <button variant="ghost" icon="skip-forward" disabled="{idle}" on-press="next_track" label="Next track"></button>
     </row>
     <row grow="1" gap="10" cross="center" main="end" label="Playback utilities">
-      <button variant="ghost" icon="{playModeIcon}" on-press="cycle_play_mode" label="Cycle play mode"></button>
+      <button variant="ghost" icon="{playModeIcon}" on-press="cycle_play_mode" label="{playModeLabel}"></button>
       <row gap="6" cross="center" label="Volume">
         <icon name="volume" width="14" height="14" foreground="text_muted" />
         <slider width="88" value="{volumeFraction}" on-change="volume_changed" label="Volume" />

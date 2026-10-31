@@ -74,6 +74,10 @@ const sequential_icon = canvas.svg_icon.parseComptime(@embedFile("icons/sequenti
 /// toggle (bullet list — distinct from sequential's list+arrow).
 const queue_icon = canvas.svg_icon.parseComptime(@embedFile("icons/queue.svg"));
 
+/// Repeat-one glyph for the single-track loop mode (the built-in set has
+/// `repeat` and `shuffle` but no repeat-one).
+const repeat_one_icon = canvas.svg_icon.parseComptime(@embedFile("icons/repeat-one.svg"));
+
 /// The registered icon table: ONE declaration feeds boot-time
 /// registration (`registerIcons`, called from main and the test
 /// harness) AND the model contract's `app_icons` list (the emit step
@@ -82,6 +86,7 @@ const queue_icon = canvas.svg_icon.parseComptime(@embedFile("icons/queue.svg"));
 pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "sequential", .icon = &sequential_icon },
     .{ .name = "queue", .icon = &queue_icon },
+    .{ .name = "repeat-one", .icon = &repeat_one_icon },
 };
 
 /// Install the app icon table; once, before views build (main does it
@@ -115,10 +120,9 @@ var ui_font_reg_count: usize = 0;
 var ui_font_bytes_released: bool = false;
 var media_session_warmed: bool = false;
 
-/// Register a CJK-capable face only when the catalog needs it. Fonts
-/// install exactly once on the installing frame — a later CJK import in
-/// a Latin-only session stays tofu until relaunch (SDK has no late
-/// `registerFont`). Empty libraries skip the ~7 MiB face entirely.
+/// Register a CJK-capable face at launch only when the catalog needs it;
+/// empty and Latin-only libraries skip the CJK face (~22 MiB in practice). The first CJK
+/// import later in the session registers it then (`registerLateUiFont`).
 fn prepareUiFontsIfNeeded(model: *const Model) void {
     if (!model_mod.libraryNeedsCjkFont(model)) {
         ui_font_reg_count = 0;
@@ -261,11 +265,9 @@ fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 /// presents delivers the new one and the corrected grid is on screen
 /// a frame later.
 ///
-/// Remote-command targets are not wired in `media_session` (ObjC bridge
-/// ABI is too fragile). Playback control rides the status-item menu
-/// (`statusItem`), projection commands (`onCommand`), and focused media
-/// keys (`onKey`). This frame hook only carries the canvas-width channel
-/// plus a one-shot free of the UI-face buffer after registration.
+/// System remote commands reach `onCommand` through `HostShim`, not this
+/// hook. This frame hook only carries the canvas-width channel plus a
+/// one-shot free of the UI-face buffer after registration.
 ///
 /// Timing: `UiApp` registers `Options.fonts` exactly once on the
 /// installing frame (copies the TTF bytes; see FontRegistration.ttf),
@@ -303,17 +305,136 @@ pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
 /// Menu-bar status-item commands arrive as transport events.
 pub fn onCommand(name: []const u8) ?Msg {
     if (std.mem.eql(u8, name, "transport.toggle")) return .{ .media_command = .toggle_play };
+    if (std.mem.eql(u8, name, "transport.play")) return .{ .media_command = .play };
+    if (std.mem.eql(u8, name, "transport.pause")) return .{ .media_command = .pause };
     if (std.mem.eql(u8, name, "transport.next")) return .{ .media_command = .next };
     if (std.mem.eql(u8, name, "transport.previous")) return .{ .media_command = .previous };
     if (std.mem.eql(u8, name, "transport.queue")) return .toggle_queue;
     return null;
 }
 
+// ------------------------------------------------------------ host seam
+
+/// A thin `App` around `UiApp` for the two jobs that need the runtime or
+/// the platform services, which `UiApp.Options` hooks never see:
+///   - system remote commands (Control Center, headphone buttons, media
+///     keys while another app is focused) arrive from `media_session` and
+///     are delivered as the same `.command` events the status-item menu
+///     sends, so `onCommand` stays the one mapping;
+///   - the CJK face registers late, the first time the catalog gains CJK
+///     text in a session that launched without it.
+const HostShim = struct {
+    inner: native_sdk.App,
+    ui: *WellMusicApp,
+    /// `library_revision` last checked for CJK text.
+    font_checked_revision: u32 = 0,
+
+    fn app(shim: *HostShim) native_sdk.App {
+        return .{
+            .context = shim,
+            .name = shim.inner.name,
+            .source = shim.inner.source,
+            .source_fn = if (shim.inner.source_fn != null) shimSource else null,
+            .scene_fn = if (shim.inner.scene_fn != null) shimScene else null,
+            .start_fn = if (shim.inner.start_fn != null) shimStart else null,
+            .event_fn = shimEvent,
+            .stop_fn = if (shim.inner.stop_fn != null) shimStop else null,
+            .replay_fn = if (shim.inner.replay_fn != null) shimReplay else null,
+        };
+    }
+
+    fn from(context: *anyopaque) *HostShim {
+        return @ptrCast(@alignCast(context));
+    }
+
+    fn afterEvent(shim: *HostShim, runtime: *native_sdk.Runtime) !void {
+        if (host_services == null) {
+            if (shim.ui.effects.services) |services| {
+                host_services = services;
+                media_session.installRemoteCommands(wakeHost);
+            }
+        }
+        while (media_session.takeRemoteCommand()) |command| {
+            try shim.inner.event(runtime, .{ .command = .{ .name = command.commandName() } });
+        }
+        const revision = shim.ui.model.library_revision;
+        if (revision != shim.font_checked_revision) {
+            shim.font_checked_revision = revision;
+            if (!ui_font.ready() and model_mod.libraryNeedsCjkFont(&shim.ui.model)) {
+                registerLateUiFont(runtime);
+            }
+        }
+    }
+};
+
+const ReplayControl = @typeInfo(@typeInfo(@typeInfo(@FieldType(native_sdk.App, "replay_fn")).optional.child).pointer.child).@"fn".params[1].type.?;
+const WebViewSource = @FieldType(native_sdk.App, "source");
+
+fn shimSource(context: *anyopaque) anyerror!WebViewSource {
+    const shim = HostShim.from(context);
+    return shim.inner.source_fn.?(shim.inner.context);
+}
+
+fn shimScene(context: *anyopaque) anyerror!native_sdk.ShellConfig {
+    const shim = HostShim.from(context);
+    return shim.inner.scene_fn.?(shim.inner.context);
+}
+
+fn shimStart(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
+    const shim = HostShim.from(context);
+    return shim.inner.start_fn.?(shim.inner.context, runtime);
+}
+
+fn shimEvent(context: *anyopaque, runtime: *native_sdk.Runtime, event: native_sdk.Event) anyerror!void {
+    const shim = HostShim.from(context);
+    try shim.inner.event(runtime, event);
+    try shim.afterEvent(runtime);
+}
+
+fn shimStop(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
+    const shim = HostShim.from(context);
+    host_services = null;
+    return shim.inner.stop_fn.?(shim.inner.context, runtime);
+}
+
+fn shimReplay(context: *anyopaque, control: ReplayControl) anyerror!void {
+    const shim = HostShim.from(context);
+    return shim.inner.replay_fn.?(shim.inner.context, control);
+}
+
+/// Platform services captured once bound; cleared at stop so a late
+/// remote command never reaches a torn-down host.
+var host_services: ?@FieldType(model_mod.Effects, "services") = null;
+
+/// Remote-command wake: a `.wake` comes back as `.effects_wake`, and
+/// `HostShim.afterEvent` drains the queued command on that event.
+fn wakeHost() void {
+    const services = (host_services orelse return) orelse return;
+    services.wake() catch {};
+}
+
+/// Load and register the CJK face mid-session. The runtime copies the
+/// bytes, so the buffer is freed right away; a refused face is dropped so
+/// the theme never names an unregistered font id.
+fn registerLateUiFont(runtime: *native_sdk.Runtime) void {
+    ui_font.load(std.heap.page_allocator);
+    if (!ui_font.ready()) return;
+    runtime.registerCanvasFont(ui_font.font_id, ui_font.faceBytes()) catch {
+        ui_font.discard(std.heap.page_allocator);
+        return;
+    };
+    ui_font.releaseBytes(std.heap.page_allocator);
+}
+
+var host_shim: HostShim = undefined;
+
 // ------------------------------------------------------------------- main
 
 pub fn main(init: std.process.Init) !void {
     registerIcons();
     var model: Model = .{};
+    // Fresh shuffle order per launch; update itself never reads entropy.
+    init.io.random(std.mem.asBytes(&model.shuffle_rng));
     var data_dir_buffer: [model_mod.max_store_path]u8 = undefined;
     var store_file_buffer: [model_mod.max_store_path]u8 = undefined;
     const data_dir = native_sdk.app_dirs.resolveOne(
@@ -360,7 +481,8 @@ pub fn main(init: std.process.Init) !void {
     defer std.heap.page_allocator.destroy(app_state);
     app_state.* = WellMusicApp.init(std.heap.page_allocator, model, wellMusicOptions());
     defer app_state.deinit();
-    try runner.runWithOptions(app_state.app(), .{
+    host_shim = .{ .inner = app_state.app(), .ui = app_state };
+    try runner.runWithOptions(host_shim.app(), .{
         .app_name = "wellmusic",
         .window_title = "WellMusic",
         .bundle_id = "app.wellmusic",

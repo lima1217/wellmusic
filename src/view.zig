@@ -275,10 +275,20 @@ fn queueRow(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
 }
 
 fn contentView(ui: *Ui, model: *const Model) Ui.Node {
-    return if (model.open_album) |album_id|
+    const content = if (model.open_album) |album_id|
         albumDetailView(ui, model, album_id)
     else
         albumGridView(ui, model);
+    // Background import progress rides above the page so it shows on the
+    // grid and on the album that is filling in alike.
+    const status = model.importStatus(ui.arena);
+    if (status.len == 0) return content;
+    return ui.column(.{ .grow = 1 }, .{
+        ui.row(.{ .padding = 12, .cross = .center, .semantics = .{ .label = "Import progress" } }, .{
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, status),
+        }),
+        content,
+    });
 }
 
 // ------------------------------------------------------------- album grid
