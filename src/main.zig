@@ -296,6 +296,9 @@ pub fn onFrame(model: *const Model, frame: native_sdk.platform.GpuFrame) ?Msg {
     if (model.cover_hydrate_pending) {
         return .cover_hydrate;
     }
+    if (model.title_heal_pending) {
+        return .title_heal;
+    }
     if (frame.size.width != model.canvas_width) {
         return Msg{ .canvas_resized = frame.size.width };
     }

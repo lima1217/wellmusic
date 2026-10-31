@@ -469,6 +469,8 @@ pub const Msg = union(enum) {
     /// load one album per subsequent present (`cover_hydrate`). Armed
     /// once at launch after sync library restore; never persisted.
     library_hydrate,
+    /// Probe one track's tags after launch (see `healNextTitle`).
+    title_heal,
     /// One album cover decode after `library_hydrate` (or after import).
     /// Spread across presents so first paint stays light.
     cover_hydrate,
@@ -497,7 +499,7 @@ pub const Msg = union(enum) {
         "edit_album",     "edit_title",     "edit_artist",
         "save_edit_track", "close_edit_track",
         "save_edit_album", "close_edit_album", "change_cover",
-        "library_hydrate", "cover_hydrate",
+        "library_hydrate", "cover_hydrate", "title_heal",
         "import_copied",
         "library_done",   "cover_done",     "volume_changed",
         "toggle_queue",   "remove_queued",  "clear_queue",
@@ -646,6 +648,9 @@ pub const Model = struct {
     /// glue can re-check derived needs — the CJK face — only when the
     /// catalog actually moved.
     library_revision: u32 = 0,
+    /// Launch-time title heal, one track per present after covers.
+    title_heal_pending: bool = false,
+    title_heal_index: usize = 0,
     /// Background import queue: jobs `[import_head, import_len)` are
     /// waiting; while `import_inflight_id` is set, the head job is
     /// copying under that reserved track id.
@@ -693,7 +698,7 @@ pub const Model = struct {
         "audio_deferred",
         "library_hydrate_pending",
         "cover_hydrate_pending", "cover_hydrate_index",
-        "library_revision",
+        "library_revision", "title_heal_pending", "title_heal_index",
         "add_menu_open",
         "import_jobs",     "import_head",    "import_len",
         "import_inflight_id", "import_total", "import_done",
@@ -1128,6 +1133,8 @@ pub const Model = struct {
         if (model.open_album == id) model.open_album = null;
         if (model.editing_album == id) model.cancelEditAlbum();
         if (cover_len > 0) deleteManagedMediaFile(model, cover_buf[0..cover_len]);
+        // Album ids recycle: the next album must not inherit this thumb.
+        deleteCoverThumb(model, id);
     }
 
     fn renumberAlbumTracks(model: *Model, album_id: u8) void {
@@ -1215,23 +1222,46 @@ pub const Model = struct {
     pub fn refreshTitlesFromMedia(model: *Model) bool {
         var changed = false;
         for (model.user_tracks[0..model.user_track_count]) |*track| {
-            const path = track.path();
-            const current = track.title();
-            const fallback = titleFromPath(path);
-            if (current.len > 0 and !std.mem.eql(u8, current, fallback)) continue;
-            const meta = metadata.probeFile(path);
-            if (meta.title_len > 0) {
-                track.setTitle(meta.title[0..meta.title_len]);
-                changed = true;
-            }
-            if (meta.artist_len > 0 and track.artist().len == 0) {
-                track.setArtist(meta.artist[0..meta.artist_len]);
-                changed = true;
-            }
-            if (meta.duration_ms > 0 and track.duration_ms == 0) {
-                track.duration_ms = meta.duration_ms;
-                changed = true;
-            }
+            if (healTrackTitle(track)) changed = true;
+        }
+        return changed;
+    }
+
+    /// One step of the launch-time heal: probe the next track that still
+    /// needs it. Spread one per presented frame (`title_heal`) because
+    /// tagless tracks never stop qualifying, so a single pass re-read
+    /// every one of them inside the first frame on every launch.
+    fn healNextTitle(model: *Model) bool {
+        while (model.title_heal_index < model.user_track_count) {
+            const track = &model.user_tracks[model.title_heal_index];
+            model.title_heal_index += 1;
+            if (!trackTitleIsFallback(track)) continue;
+            return healTrackTitle(track);
+        }
+        model.title_heal_pending = false;
+        return false;
+    }
+
+    fn trackTitleIsFallback(track: *const UserTrack) bool {
+        const current = track.title();
+        return current.len == 0 or std.mem.eql(u8, current, titleFromPath(track.path()));
+    }
+
+    fn healTrackTitle(track: *UserTrack) bool {
+        if (!trackTitleIsFallback(track)) return false;
+        const meta = metadata.probeFile(track.path());
+        var changed = false;
+        if (meta.title_len > 0) {
+            track.setTitle(meta.title[0..meta.title_len]);
+            changed = true;
+        }
+        if (meta.artist_len > 0 and track.artist().len == 0) {
+            track.setArtist(meta.artist[0..meta.artist_len]);
+            changed = true;
+        }
+        if (meta.duration_ms > 0 and track.duration_ms == 0) {
+            track.duration_ms = meta.duration_ms;
+            changed = true;
         }
         return changed;
     }
@@ -1733,9 +1763,9 @@ pub fn bootSession(model: *Model, fx: *Effects) void {
 /// from on-disk tags. Cover decode is staggered via `armCoverHydrate` so
 /// the first present stays cheap. Safe with an empty library.
 pub fn hydrateLibrary(model: *Model, fx: *Effects) void {
-    var changed = migrateExternalMedia(model);
-    if (model.refreshTitlesFromMedia()) changed = true;
-    if (changed) persistLibrary(model, fx);
+    if (migrateExternalMedia(model)) persistLibrary(model, fx);
+    model.title_heal_index = 0;
+    model.title_heal_pending = model.user_track_count > 0;
     armCoverHydrate(model);
     // Session-restored now-playing cover should appear with the transport
     // on the first trickle, not after every other album.
@@ -1909,6 +1939,7 @@ pub fn importCoverFromSource(model: *Model, album_id: u8, source: []const u8) bo
     if (old_len > 0) @memcpy(old_buf[0..old_len], old);
     if (!copySourceToManagedPath(source, dest)) return false;
     album.setCoverPath(dest);
+    deleteCoverThumb(model, album_id);
     if (old_len > 0 and !std.mem.eql(u8, old_buf[0..old_len], dest)) {
         deleteManagedMediaFile(model, old_buf[0..old_len]);
     }
@@ -2243,7 +2274,12 @@ fn pickAndSetCover(model: *Model, fx: *Effects, album_id: u8) void {
     _ = loadCoverFromPath(model, fx, album_id);
 }
 
+/// Load an album's cover unless it is already registered. Every track
+/// start asks, so without this check each song change re-read (and,
+/// before thumbs, re-decoded) the cover on the UI thread. An explicit
+/// cover change goes through `loadCoverFromPath` directly.
 fn requestCoverLoad(model: *Model, fx: *Effects, album_id: u8) void {
+    if (model.coverFor(album_id) != 0) return;
     _ = loadCoverFromPath(model, fx, album_id);
 }
 
@@ -2305,6 +2341,12 @@ fn syncNowPlaying(model: *const Model) void {
 /// Process-lifetime RGBA decode scratch shared across sequential cover
 /// loads so boot-time hydration does not alloc/free ~64 MiB per album.
 var cover_decode_scratch: []u8 = &.{};
+
+fn releaseCoverDecodeScratch() void {
+    if (cover_decode_scratch.len == 0) return;
+    std.heap.page_allocator.free(cover_decode_scratch);
+    cover_decode_scratch = &.{};
+}
 
 fn coverDecodeScratch(bytes: usize) ?[]u8 {
     if (cover_decode_scratch.len >= bytes) return cover_decode_scratch[0..bytes];
@@ -2392,12 +2434,92 @@ pub fn loadCoverFromPath(model: *Model, fx: *Effects, album_id: u8) bool {
         _ = fx.unregisterImage(album_id);
         return true;
     }
+    // A valid thumb needs only the cover's size, not its (up to 32 MiB)
+    // bytes.
+    if (coverFileSize(album.coverPath())) |size| {
+        if (registerCoverThumb(model, fx, album_id, size)) return true;
+    }
     const encoded = readCoverFileBytes(album.coverPath()) orelse {
         album.cover = 0;
         return false;
     };
     defer std.heap.page_allocator.free(encoded);
     return registerCoverEncoded(model, fx, album_id, encoded);
+}
+
+// ------------------------------------------------------------ cover thumbs
+
+/// Downscaled cover pixels cached beside the managed cover as
+/// `media/c{id}.thumb`, so launches register ready RGBA instead of
+/// decoding the original (a phone photo cost tens of MB of decoder
+/// memory and a visible hitch per album). Layout: magic, u16 width,
+/// u16 height, u64 source size, then width*height*4 RGBA bytes. The
+/// source size is the staleness check; replacing a cover also deletes
+/// the thumb.
+const cover_thumb_magic = "WMT1";
+const cover_thumb_header_len = cover_thumb_magic.len + 2 + 2 + 8;
+
+fn coverThumbPath(model: *const Model, album_id: u8, buffer: *[max_user_path]u8) ?[]const u8 {
+    const root = model.mediaDir();
+    if (root.len == 0) return null;
+    return std.fmt.bufPrint(buffer, "{s}{c}c{d}.thumb", .{ root, std.fs.path.sep, album_id }) catch null;
+}
+
+fn deleteCoverThumb(model: *const Model, album_id: u8) void {
+    var buffer: [max_user_path]u8 = undefined;
+    const path = coverThumbPath(model, album_id, &buffer) orelse return;
+    deleteManagedMediaFile(model, path);
+}
+
+fn writeCoverThumb(model: *const Model, album_id: u8, source_size: u64, width: usize, height: usize, rgba: []const u8) void {
+    var path_buffer: [max_user_path]u8 = undefined;
+    const path = coverThumbPath(model, album_id, &path_buffer) orelse return;
+    var header: [cover_thumb_header_len]u8 = undefined;
+    @memcpy(header[0..4], cover_thumb_magic);
+    std.mem.writeInt(u16, header[4..6], @intCast(width), .little);
+    std.mem.writeInt(u16, header[6..8], @intCast(height), .little);
+    std.mem.writeInt(u64, header[8..16], source_size, .little);
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch return;
+    defer file.close(io);
+    file.writeStreamingAll(io, &header) catch return;
+    file.writeStreamingAll(io, rgba) catch return;
+}
+
+/// Register the cached thumb when it matches the current cover file.
+fn registerCoverThumb(model: *Model, fx: *Effects, album_id: u8, source_size: u64) bool {
+    var path_buffer: [max_user_path]u8 = undefined;
+    const path = coverThumbPath(model, album_id, &path_buffer) orelse return false;
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    defer file.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    var header: [cover_thumb_header_len]u8 = undefined;
+    const header_len = reader.interface.readSliceShort(&header) catch return false;
+    if (header_len != header.len or !std.mem.eql(u8, header[0..4], cover_thumb_magic)) return false;
+    const width: usize = std.mem.readInt(u16, header[4..6], .little);
+    const height: usize = std.mem.readInt(u16, header[6..8], .little);
+    if (std.mem.readInt(u64, header[8..16], .little) != source_size) return false;
+    if (width == 0 or height == 0 or width > max_cover_register_edge or height > max_cover_register_edge) return false;
+    var pixels: [max_cover_register_edge * max_cover_register_edge * 4]u8 = undefined;
+    const need = width * height * 4;
+    const got = reader.interface.readSliceShort(pixels[0..need]) catch return false;
+    if (got != need) return false;
+    fx.registerImage(album_id, width, height, pixels[0..need]) catch return false;
+    const album = model.userAlbumByIdMut(album_id) orelse return false;
+    album.cover = album_id;
+    return true;
+}
+
+fn coverFileSize(path: []const u8) ?u64 {
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    return fileSizeAt(threaded.io(), path);
 }
 
 fn readCoverFileBytes(path: []const u8) ?[]u8 {
@@ -2451,15 +2573,29 @@ fn downscaleRgba(
     dst_w: usize,
     dst_h: usize,
 ) void {
+    // Area average: every source pixel under a destination pixel
+    // contributes. Nearest-neighbour sampling of a 4000 px photo down to
+    // 256 px aliased fine detail into jagged edges and moiré.
     var y: usize = 0;
     while (y < dst_h) : (y += 1) {
-        const sy = y * src_h / dst_h;
+        const y0 = y * src_h / dst_h;
+        const y1 = @max(y0 + 1, (y + 1) * src_h / dst_h);
         var x: usize = 0;
         while (x < dst_w) : (x += 1) {
-            const sx = x * src_w / dst_w;
-            const si = (sy * src_w + sx) * 4;
+            const x0 = x * src_w / dst_w;
+            const x1 = @max(x0 + 1, (x + 1) * src_w / dst_w);
+            var sum: [4]u32 = .{ 0, 0, 0, 0 };
+            var sy = y0;
+            while (sy < y1) : (sy += 1) {
+                var sx = x0;
+                while (sx < x1) : (sx += 1) {
+                    const si = (sy * src_w + sx) * 4;
+                    inline for (0..4) |c| sum[c] += src[si + c];
+                }
+            }
+            const n: u32 = @intCast((y1 - y0) * (x1 - x0));
             const di = (y * dst_w + x) * 4;
-            dst[di..][0..4].* = src[si..][0..4].*;
+            inline for (0..4) |c| dst[di + c] = @intCast((sum[c] + n / 2) / n);
         }
     }
 }
@@ -2478,6 +2614,9 @@ fn registerCoverEncoded(model: *Model, fx: *Effects, album_id: u8, encoded: []co
             return false;
         };
 
+        // The scratch is sized for a 4096² decode; hand it back as soon
+        // as this cover is registered rather than keeping it resident.
+        defer releaseCoverDecodeScratch();
         const decoded = services.decodeImage(encoded, decode_buf) catch {
             album.cover = 0;
             return false;
@@ -2506,6 +2645,7 @@ fn registerCoverEncoded(model: *Model, fx: *Effects, album_id: u8, encoded: []co
             return false;
         };
         album.cover = album_id;
+        writeCoverThumb(model, album_id, encoded.len, fitted.w, fitted.h, rgba);
         return true;
     }
 
@@ -2729,6 +2869,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .cover_hydrate => {
             if (!model.cover_hydrate_pending) return;
             hydrateNextCover(model, fx);
+        },
+        .title_heal => {
+            if (!model.title_heal_pending) return;
+            if (model.healNextTitle()) persistLibrary(model, fx);
         },
         .import_copied => |exit| finishImportCopy(model, fx, exit),
         .library_done => |result| switch (result.op) {

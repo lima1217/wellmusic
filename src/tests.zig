@@ -341,8 +341,12 @@ test "first frame hydrates library after album grid can paint" {
     apply(&model, cover_msg.?);
     try testing.expect(!model.cover_hydrate_pending);
 
-    const again = main.onFrame(&model, frame);
-    try testing.expect(again == null);
+    // Then tag re-probes, one track per present.
+    while (main.onFrame(&model, frame)) |heal_msg| {
+        try testing.expect(heal_msg == .title_heal);
+        apply(&model, heal_msg);
+    }
+    try testing.expect(!model.title_heal_pending);
 }
 
 test "header overflow consolidates add and theme actions" {
@@ -1131,6 +1135,54 @@ test "oversized cover downscales into the canvas image slot" {
     try testing.expectEqual(@as(usize, model_mod.max_cover_register_edge), info.height);
 }
 
+test "covers load from the cached thumb without decoding again" {
+    var live = try LiveApp.start(true);
+    defer live.stop();
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const media_root = "/tmp/wellmusic-thumb-media";
+    const source = "/tmp/wellmusic-thumb-source.png";
+    const managed = "/tmp/wellmusic-thumb-media/c1.png";
+    const thumb = "/tmp/wellmusic-thumb-media/c1.thumb";
+    defer std.Io.Dir.deleteFileAbsolute(io, source) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, managed) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, thumb) catch {};
+
+    const width: usize = 512;
+    const pixels = try testing.allocator.alloc(u8, width * width * 4);
+    defer testing.allocator.free(pixels);
+    @memset(pixels, 90);
+    const png_len = try canvas.png.encodedRgba8ByteLen(width, width);
+    const png_buf = try testing.allocator.alloc(u8, png_len);
+    defer testing.allocator.free(png_buf);
+    var png_writer = std.Io.Writer.fixed(png_buf);
+    try canvas.png.writeRgba8(&png_writer, width, width, pixels);
+    try writeTestFile(io, source, png_writer.buffered());
+
+    const model = &live.app_state.model;
+    model.setMediaDir(media_root);
+    try testing.expect(model.ensureLibraryAlbum());
+    const album_id = model_mod.imported_album_id;
+    try testing.expect(model_mod.importCoverFromSource(model, album_id, source));
+    try testing.expect(model_mod.loadCoverFromPath(model, &live.app_state.effects, album_id));
+    try testing.expect(model_mod.localAudioReadable(thumb));
+
+    // Same size, undecodable bytes: only the thumb can satisfy this load.
+    const junk = try testing.allocator.alloc(u8, png_writer.buffered().len);
+    defer testing.allocator.free(junk);
+    @memset(junk, 0);
+    try writeTestFile(io, managed, junk);
+    model.user_albums[0].cover = 0;
+    try testing.expect(model_mod.loadCoverFromPath(model, &live.app_state.effects, album_id));
+    try testing.expect(model.coverFor(album_id) != 0);
+
+    // A new cover replaces the thumb rather than reusing a stale one.
+    try testing.expect(model_mod.importCoverFromSource(model, album_id, source));
+    try testing.expect(!model_mod.localAudioReadable(thumb));
+}
+
 fn pendingTimer(fx: *model_mod.Effects, key: u64) ?u64 {
     var i: usize = 0;
     while (i < fx.pendingTimerCount()) : (i += 1) {
@@ -1404,4 +1456,22 @@ test "every catalog save bumps the library revision" {
     apply(&model, .save_edit_track);
     try testing.expect(model.library_revision != before);
     try testing.expect(model_mod.libraryNeedsCjkFont(&model));
+}
+
+test "launch title heal runs one track per step and then stops" {
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/demo/heal-a.mp3"));
+    try testing.expect(model.addUserTrack("/tmp/demo/heal-b.mp3"));
+    model.user_tracks[1].setTitle("Tagged elsewhere");
+    model.library_hydrate_pending = true;
+    apply(&model, .library_hydrate);
+    try testing.expect(model.title_heal_pending);
+    model.cover_hydrate_pending = false;
+    const frame = native_sdk.platform.GpuFrame{ .size = geometry.SizeF.init(model.canvas_width, 720) };
+    try testing.expectEqual(Msg.title_heal, main.onFrame(&model, frame).?);
+
+    apply(&model, .title_heal); // probes heal-a (still tagless)
+    try testing.expect(model.title_heal_pending);
+    apply(&model, .title_heal); // skips the tagged track, finds nothing left
+    try testing.expect(!model.title_heal_pending);
 }
