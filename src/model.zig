@@ -54,10 +54,21 @@ pub const imported_album_id: u8 = 1;
 pub const first_user_album_id: u8 = 1;
 pub const first_user_track_id: u8 = 1;
 pub const max_user_albums = 32;
-pub const max_user_tracks = 64;
+pub const max_user_tracks = 240;
 pub const max_user_title = 128;
 pub const max_user_path = 1024;
-pub const max_library_store_bytes = 256 * 1024;
+pub const max_library_store_bytes = 512 * 1024;
+
+// `appendFmt` drops a line that does not fit, so the store ceiling must
+// cover a library where every field is at its cap — otherwise a large
+// library would silently persist truncated.
+comptime {
+    const id_field = 3 + 1; // "255" + tab
+    const album_line = "album\t".len + id_field + (max_user_title + 1) * 2 + 6 + max_user_path + 1;
+    const track_line = "track\t".len + id_field * 3 + (max_user_title + 1) * 2 + (max_user_path + 1) + 10 + 1;
+    const worst = library_store_header.len + 1 + max_user_albums * album_line + max_user_tracks * track_line;
+    if (worst > max_library_store_bytes) @compileError("max_library_store_bytes cannot hold a full library");
+}
 pub const max_store_path = 512;
 pub const library_write_key: u64 = 4;
 pub const session_read_key: u64 = 5;
@@ -138,16 +149,16 @@ pub const UserAlbum = struct {
     }
 
     pub fn setTitle(album: *UserAlbum, value: []const u8) void {
-        const len = @min(value.len, max_user_title);
-        @memcpy(album.title_storage[0..len], value[0..len]);
-        album.title_len = len;
+        const kept = metadata.utf8Prefix(value, max_user_title);
+        @memcpy(album.title_storage[0..kept.len], kept);
+        album.title_len = kept.len;
         album.refreshInitials();
     }
 
     pub fn setArtist(album: *UserAlbum, value: []const u8) void {
-        const len = @min(value.len, max_user_title);
-        @memcpy(album.artist_storage[0..len], value[0..len]);
-        album.artist_len = len;
+        const kept = metadata.utf8Prefix(value, max_user_title);
+        @memcpy(album.artist_storage[0..kept.len], kept);
+        album.artist_len = kept.len;
         album.refreshInitials();
     }
 
@@ -212,15 +223,15 @@ pub const UserTrack = struct {
     }
 
     pub fn setTitle(track: *UserTrack, value: []const u8) void {
-        const len = @min(value.len, max_user_title);
-        @memcpy(track.title_storage[0..len], value[0..len]);
-        track.title_len = len;
+        const kept = metadata.utf8Prefix(value, max_user_title);
+        @memcpy(track.title_storage[0..kept.len], kept);
+        track.title_len = kept.len;
     }
 
     pub fn setArtist(track: *UserTrack, value: []const u8) void {
-        const len = @min(value.len, max_user_title);
-        @memcpy(track.artist_storage[0..len], value[0..len]);
-        track.artist_len = len;
+        const kept = metadata.utf8Prefix(value, max_user_title);
+        @memcpy(track.artist_storage[0..kept.len], kept);
+        track.artist_len = kept.len;
     }
 
     fn setPath(track: *UserTrack, value: []const u8) void {
@@ -547,11 +558,9 @@ pub const Model = struct {
     /// User albums (Library + folder imports). Cap is loud by design.
     user_albums: [max_user_albums]UserAlbum = undefined,
     user_album_count: usize = 0,
-    next_user_album_id: u8 = first_user_album_id + 1,
     /// User-imported tracks across all albums. Cap is loud by design.
     user_tracks: [max_user_tracks]UserTrack = undefined,
     user_track_count: usize = 0,
-    next_user_track_id: u8 = first_user_track_id,
     /// Application Support path for the user-library store.
     store_path_buffer: [max_store_path]u8 = undefined,
     store_path_len: usize = 0,
@@ -607,8 +616,8 @@ pub const Model = struct {
         "colorScheme",     "hasNowPlaying",
         "visibleAlbums",
         "albumCount",
-        "user_albums",     "user_album_count", "next_user_album_id",
-        "user_tracks",     "user_track_count", "next_user_track_id",
+        "user_albums",     "user_album_count",
+        "user_tracks",     "user_track_count",
         "store_path_buffer", "store_path_len", "store_write_inflight",
         "session_path_buffer", "session_path_len",
         "media_dir_buffer", "media_dir_len",
@@ -927,6 +936,27 @@ pub const Model = struct {
         return track.id;
     }
 
+    /// Lowest unused track id. Ids recycle after removal: a monotonic u8
+    /// counter overflowed (a safety panic) on the 255th cumulative import
+    /// and, restored from a library whose top id was 255, wrapped to 0 and
+    /// refused every later import.
+    fn freeTrackId(model: *const Model) ?u8 {
+        var used = std.StaticBitSet(256).initEmpty();
+        for (model.user_tracks[0..model.user_track_count]) |*track| used.set(track.id);
+        return lowestFreeId(&used, first_user_track_id);
+    }
+
+    /// Lowest unused folder-album id. The Library id is reserved even
+    /// while that album does not exist, so loose imports never land in a
+    /// folder album. Low ids also keep cover image slots (ImageId ==
+    /// album id) dense.
+    fn freeAlbumId(model: *const Model) ?u8 {
+        var used = std.StaticBitSet(256).initEmpty();
+        used.set(imported_album_id);
+        for (model.user_albums[0..model.user_album_count]) |*album| used.set(album.id);
+        return lowestFreeId(&used, first_user_album_id);
+    }
+
     // ------------------------------------------------------------ mutation
 
     fn pushQueue(model: *Model, track_id: u8) void {
@@ -967,27 +997,19 @@ pub const Model = struct {
         album.year = 2026;
         model.user_albums[model.user_album_count] = album;
         model.user_album_count += 1;
-        if (model.next_user_album_id <= imported_album_id) {
-            model.next_user_album_id = imported_album_id + 1;
-        }
         return true;
     }
 
     /// Create a user album. Returns the new album id, or null when full.
     pub fn addUserAlbum(model: *Model, title: []const u8, artist: []const u8) ?u8 {
         if (model.user_album_count >= max_user_albums) return null;
-        if (model.next_user_album_id == 0) return null;
-        // Never reuse the Library id for folder imports.
-        if (model.next_user_album_id == imported_album_id) model.next_user_album_id += 1;
-        if (model.next_user_album_id == 0) return null;
         var album: UserAlbum = .{};
-        album.id = model.next_user_album_id;
+        album.id = model.freeAlbumId() orelse return null;
         album.setTitle(if (title.len > 0) title else "Album");
         album.setArtist(if (artist.len > 0) artist else "My Music");
         album.year = 2026;
         model.user_albums[model.user_album_count] = album;
         model.user_album_count += 1;
-        model.next_user_album_id += 1;
         return album.id;
     }
 
@@ -1049,17 +1071,29 @@ pub const Model = struct {
         path: []const u8,
         name_path: []const u8,
     ) bool {
+        const id = model.freeTrackId() orelse return false;
+        return model.insertUserTrack(id, album_id, path, name_path);
+    }
+
+    /// Insert under a caller-chosen free `id` — `importAudioFromSource`
+    /// names the managed copy (`t{id}`) before the track exists.
+    fn insertUserTrack(
+        model: *Model,
+        id: u8,
+        album_id: u8,
+        path: []const u8,
+        name_path: []const u8,
+    ) bool {
         if (path.len == 0 or path.len > max_user_path) return false;
         if (model.user_track_count >= max_user_tracks) return false;
         if (model.pathAlreadyImported(path)) return false;
-        if (model.next_user_track_id == 0) return false;
         if (album_id == imported_album_id) {
             if (!model.ensureLibraryAlbum()) return false;
         } else if (model.userAlbumById(album_id) == null) {
             return false;
         }
         var track: UserTrack = .{};
-        track.id = model.next_user_track_id;
+        track.id = id;
         track.album = album_id;
         track.number = @intCast(model.tracksInAlbum(album_id) + 1);
         track.setPath(path);
@@ -1073,7 +1107,6 @@ pub const Model = struct {
         if (meta.duration_ms > 0) track.duration_ms = meta.duration_ms;
         model.user_tracks[model.user_track_count] = track;
         model.user_track_count += 1;
-        model.next_user_track_id += 1;
         // First track in a folder album can rename a generic album from tags.
         if (album_id != imported_album_id and track.number == 1) {
             if (model.userAlbumByIdMut(album_id)) |album| {
@@ -1289,8 +1322,6 @@ pub const Model = struct {
             return false;
         model.user_album_count = 0;
         model.user_track_count = 0;
-        model.next_user_album_id = first_user_album_id + 1;
-        model.next_user_track_id = first_user_track_id;
         var legacy_cover: ?[]const u8 = null;
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \r");
@@ -1326,7 +1357,6 @@ pub const Model = struct {
                 if (cover_path.len > 0) album.setCoverPath(cover_path);
                 model.user_albums[model.user_album_count] = album;
                 model.user_album_count += 1;
-                if (id >= model.next_user_album_id) model.next_user_album_id = id +% 1;
                 continue;
             }
             if (!std.mem.eql(u8, kind, "track")) return false;
@@ -1367,7 +1397,6 @@ pub const Model = struct {
             track.setPath(path);
             model.user_tracks[model.user_track_count] = track;
             model.user_track_count += 1;
-            if (id >= model.next_user_track_id) model.next_user_track_id = id +% 1;
         }
         if (version < 3) {
             if (!model.ensureLibraryAlbum() and model.user_track_count > 0) return false;
@@ -1461,6 +1490,14 @@ fn formatMs(arena: std.mem.Allocator, ms: u32) []const u8 {
     return std.fmt.allocPrint(arena, "{d}:{d:0>2}", .{ total_seconds / 60, total_seconds % 60 }) catch "";
 }
 
+fn lowestFreeId(used: *const std.StaticBitSet(256), first: u8) ?u8 {
+    var id: usize = first;
+    while (id < 256) : (id += 1) {
+        if (!used.isSet(id)) return @intCast(id);
+    }
+    return null;
+}
+
 fn appendFmt(buffer: []u8, len: *usize, comptime fmt: []const u8, args: anytype) void {
     const written = std.fmt.bufPrint(buffer[len.*..], fmt, args) catch return;
     len.* += written.len;
@@ -1527,11 +1564,14 @@ pub fn persistLibrary(model: *Model, fx: *Effects) void {
         model.save_pending = true;
         return;
     }
-    var buffer: [max_library_store_bytes]u8 = undefined;
+    // Heap scratch: a full-capacity store is too large for the update
+    // stack. `writeFile` copies the bytes before returning.
+    const buffer = std.heap.page_allocator.alloc(u8, max_library_store_bytes) catch return;
+    defer std.heap.page_allocator.free(buffer);
     fx.writeFile(.{
         .key = library_write_key,
         .path = model.storePath(),
-        .bytes = model.serializeLibrary(&buffer),
+        .bytes = model.serializeLibrary(buffer),
         .on_result = Effects.fileMsg(.library_done),
     });
     model.store_write_inflight = true;
@@ -1554,13 +1594,14 @@ pub fn loadLibrarySync(model: *Model) void {
     const size = (file.stat(io) catch return).size;
     if (size == 0) return;
     if (size > max_library_store_bytes) return;
-    var buffer: [max_library_store_bytes]u8 = undefined;
     const len: usize = @intCast(size);
+    const buffer = std.heap.page_allocator.alloc(u8, len) catch return;
+    defer std.heap.page_allocator.free(buffer);
     var read_buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &read_buffer);
-    const n = reader.interface.readSliceShort(buffer[0..len]) catch return;
+    const n = reader.interface.readSliceShort(buffer) catch return;
     if (n != len) return;
-    _ = model.restoreLibrary(buffer[0..len]);
+    _ = model.restoreLibrary(buffer);
 }
 
 /// Kick session restore from `init_fx`. Covers / migrate / title heal wait
@@ -1713,20 +1754,19 @@ pub fn importAudioFromSource(model: *Model, album_id: u8, source: []const u8) bo
     if (model.mediaDir().len == 0) return model.addUserTrackToAlbum(album_id, source);
     if (source.len == 0 or source.len > max_user_path) return false;
     if (model.user_track_count >= max_user_tracks) return false;
-    if (model.next_user_track_id == 0) return false;
     if (album_id == imported_album_id) {
         if (!model.ensureLibraryAlbum()) return false;
     } else if (model.userAlbumById(album_id) == null) {
         return false;
     }
-    const id = model.next_user_track_id;
+    const id = model.freeTrackId() orelse return false;
     var dest_buf: [max_user_path]u8 = undefined;
     const dest = mediaDestPath(model, 't', id, source, &dest_buf) orelse return false;
     if (model.pathAlreadyImported(dest)) return false;
     if (!copySourceToManagedPath(source, dest)) return false;
     // Title fallback must use the original source basename ("Song.mp3"),
     // never the managed copy ("t1.mp3").
-    if (!model.addUserTrackToAlbumNamed(album_id, dest, source)) {
+    if (!model.insertUserTrack(id, album_id, dest, source)) {
         deleteManagedMediaFile(model, dest);
         return false;
     }
@@ -1830,7 +1870,9 @@ fn pickAndImportAlbum(model: *Model, fx: *Effects) void {
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
-    var audio_paths: [max_user_tracks][max_user_path]u8 = undefined;
+    // ~240 KiB at full capacity: heap, not the update stack.
+    const audio_paths = std.heap.page_allocator.alloc([max_user_path]u8, max_user_tracks) catch return;
+    defer std.heap.page_allocator.free(audio_paths);
     var audio_lens: [max_user_tracks]usize = undefined;
     var audio_count: usize = 0;
     var cover_path_buf: [max_user_path]u8 = undefined;
@@ -2358,6 +2400,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .remove_track => |id| {
             if (!isUserTrackId(id)) return;
             const was_playing = model.now == id;
+            const was_queued = model.queueIndexOf(id) != null;
             if (!model.removeUserTrack(id)) return;
             if (model.editing_track == id) model.cancelEditTrack();
             if (was_playing) {
@@ -2365,8 +2408,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 // Publish moved out of animations — clear Control Center
                 // when the loaded track disappears.
                 syncNowPlaying(model);
-                persistSession(model, fx);
             }
+            // Ids recycle, so a stale queue entry in session.txt would
+            // resurrect as whichever track next takes this id.
+            if (was_playing or was_queued) persistSession(model, fx);
             persistLibrary(model, fx);
         },
         .edit_track => |id| {

@@ -151,6 +151,52 @@ test "user library add remove and persist round-trip" {
     try testing.expectEqual(@as(u8, 1), restored.user_tracks[0].number);
 }
 
+test "track ids recycle so repeated add/remove never exhausts the id space" {
+    var model: Model = .{};
+    var path_buf: [64]u8 = undefined;
+    var round: usize = 0;
+    // Well past 255 cumulative imports: a monotonic u8 counter would
+    // overflow here.
+    while (round < 300) : (round += 1) {
+        const path = try std.fmt.bufPrint(&path_buf, "/tmp/cycle-{d}.mp3", .{round});
+        try testing.expect(model.addUserTrack(path));
+        try testing.expectEqual(@as(u8, model_mod.first_user_track_id), model.user_tracks[0].id);
+        try testing.expect(model.removeUserTrack(model.user_tracks[0].id));
+    }
+    try testing.expectEqual(@as(usize, 0), model.user_track_count);
+}
+
+test "a restored library with id 255 still accepts imports" {
+    var model: Model = .{};
+    const bytes = model_mod.library_store_header ++ "\n" ++
+        "album\t1\tLibrary\tMy Music\t2026\t\n" ++
+        "track\t255\t1\t1\tLast\t\t/Music/last.mp3\t0\n";
+    try testing.expect(model.restoreLibrary(bytes));
+    try testing.expect(model.addUserTrack("/Music/next.mp3"));
+    try testing.expectEqual(@as(u8, model_mod.first_user_track_id), model.user_tracks[1].id);
+}
+
+test "library capacity holds more than an album's worth of tracks" {
+    var model: Model = .{};
+    var path_buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < model_mod.max_user_tracks) : (i += 1) {
+        const path = try std.fmt.bufPrint(&path_buf, "/tmp/cap-{d}.mp3", .{i});
+        try testing.expect(model.addUserTrack(path));
+    }
+    try testing.expect(!model.addUserTrack("/tmp/one-too-many.mp3"));
+    try testing.expectEqual(@as(u8, model_mod.max_user_tracks), model.userTrackById(model_mod.max_user_tracks).?.number);
+}
+
+test "title truncation keeps whole UTF-8 sequences" {
+    var track: model_mod.UserTrack = .{};
+    // 43 three-byte CJK characters = 129 bytes: one byte over the cap.
+    const long = "\u{97f3}" ** 43;
+    track.setTitle(long);
+    try testing.expectEqual(@as(usize, 126), track.title().len);
+    try testing.expect(std.unicode.utf8ValidateSlice(track.title()));
+}
+
 test "folder album import creates a separate album" {
     var model: Model = .{};
     try testing.expect(model.addUserTrack("/loose/a.mp3"));

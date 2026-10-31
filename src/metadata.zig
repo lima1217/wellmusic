@@ -38,23 +38,33 @@ pub const ProbeBuffers = struct {
     }
 
     fn setTitle(self: *ProbeBuffers, value: []const u8) void {
-        const len = @min(value.len, self.title.len);
-        @memcpy(self.title[0..len], value[0..len]);
-        self.title_len = len;
+        const kept = utf8Prefix(value, self.title.len);
+        @memcpy(self.title[0..kept.len], kept);
+        self.title_len = kept.len;
     }
 
     fn setArtist(self: *ProbeBuffers, value: []const u8) void {
-        const len = @min(value.len, self.artist.len);
-        @memcpy(self.artist[0..len], value[0..len]);
-        self.artist_len = len;
+        const kept = utf8Prefix(value, self.artist.len);
+        @memcpy(self.artist[0..kept.len], kept);
+        self.artist_len = kept.len;
     }
 
     fn setAlbum(self: *ProbeBuffers, value: []const u8) void {
-        const len = @min(value.len, self.album.len);
-        @memcpy(self.album[0..len], value[0..len]);
-        self.album_len = len;
+        const kept = utf8Prefix(value, self.album.len);
+        @memcpy(self.album[0..kept.len], kept);
+        self.album_len = kept.len;
     }
 };
+
+/// The longest prefix of `value` that fits `max` bytes without splitting
+/// a UTF-8 sequence. A byte cut mid-character (a long CJK tag hitting a
+/// 128-byte field) leaves an invalid tail that renders as tofu.
+pub fn utf8Prefix(value: []const u8, max: usize) []const u8 {
+    if (value.len <= max) return value;
+    var end = max;
+    while (end > 0 and (value[end] & 0xC0) == 0x80) end -= 1;
+    return value[0..end];
+}
 
 /// Probe an absolute audio path. Missing / unreadable files yield an
 /// empty probe (no error) so import stays best-effort.
