@@ -24,6 +24,7 @@ const theme = @import("theme.zig");
 const view_mod = @import("view.zig");
 const media_session = @import("media_session.zig");
 const ui_font = @import("ui_font.zig");
+const locale = @import("locale.zig");
 
 pub const Model = model_mod.Model;
 pub const Msg = model_mod.Msg;
@@ -66,12 +67,12 @@ pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 // -------------------------------------------------------------- app icons
 
-/// Sequential (play-through once) glyph: a list with a forward arrow,
-/// distinct from the looping `repeat` mark.
-const sequential_icon = canvas.svg_icon.parseComptime(@embedFile("icons/sequential.svg"));
+/// Muted speaker for the volume button (the built-in set has only the
+/// plain `volume` speaker).
+const volume_mute_icon = canvas.svg_icon.parseComptime(@embedFile("icons/volume-mute.svg"));
 
 /// Play-next queue / up-next glyph for the always-visible transport
-/// toggle (bullet list — distinct from sequential's list+arrow).
+/// toggle (a bullet list).
 const queue_icon = canvas.svg_icon.parseComptime(@embedFile("icons/queue.svg"));
 
 /// Repeat-one glyph for the single-track loop mode (the built-in set has
@@ -84,7 +85,7 @@ const repeat_one_icon = canvas.svg_icon.parseComptime(@embedFile("icons/repeat-o
 /// reflects this decl), so markup `app:<name>` references are verified
 /// by `native check` against exactly what the app registers.
 pub const app_icons = [_]canvas.icons.Entry{
-    .{ .name = "sequential", .icon = &sequential_icon },
+    .{ .name = "volume-mute", .icon = &volume_mute_icon },
     .{ .name = "queue", .icon = &queue_icon },
     .{ .name = "repeat-one", .icon = &repeat_one_icon },
 };
@@ -174,19 +175,19 @@ fn statusItem(model: *const Model, scratch: *WellMusicApp.StatusItemScratch) Wel
     var count: usize = 0;
     scratch.items[count] = .{
         .id = 1,
-        .label = if (model.playing) "Pause" else "Play",
+        .label = model.str(if (model.playing) .pause else .play),
         .command = "transport.toggle",
     };
     count += 1;
-    scratch.items[count] = .{ .id = 2, .label = "Next", .command = "transport.next" };
+    scratch.items[count] = .{ .id = 2, .label = model.str(.next), .command = "transport.next" };
     count += 1;
-    scratch.items[count] = .{ .id = 3, .label = "Previous", .command = "transport.previous" };
+    scratch.items[count] = .{ .id = 3, .label = model.str(.previous), .command = "transport.previous" };
     count += 1;
     scratch.items[count] = .{ .separator = true };
     count += 1;
     scratch.items[count] = .{
         .id = 4,
-        .label = if (model.queue_open) "Hide Queue" else "Show Queue",
+        .label = model.str(if (model.queue_open) .hide_queue else .show_queue),
         .command = "transport.queue",
     };
     count += 1;
@@ -209,8 +210,20 @@ fn statusItem(model: *const Model, scratch: *WellMusicApp.StatusItemScratch) Wel
 ///     playback and never the focus ring — outlines belong to Tab;
 ///   - ENTER plays the selected track (pause toggle when it is the
 ///     loaded one).
+///   - Cmd+→ / Cmd+← skip tracks, Cmd+↑ / Cmd+↓ step the volume (the
+///     Music app's bindings), and Escape or Cmd+[ leave an album page.
 pub fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
-    if (keyboard.modifiers.hasNavigationModifier() or keyboard.modifiers.shift) return null;
+    const mods = keyboard.modifiers;
+    if (mods.super and !mods.control and !mods.alt and !mods.shift) {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return .{ .media_command = .next };
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return .{ .media_command = .previous };
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return .{ .volume_step = .up };
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return .{ .volume_step = .down };
+        if (std.mem.eql(u8, keyboard.key, "[")) return .close_album;
+        return null;
+    }
+    if (mods.hasNavigationModifier() or mods.shift) return null;
+    if (std.ascii.eqlIgnoreCase(keyboard.key, "escape")) return .close_album;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "space")) return .toggle_play;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return .select_next;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return .select_previous;
@@ -313,6 +326,7 @@ pub fn onCommand(name: []const u8) ?Msg {
     if (std.mem.eql(u8, name, "transport.next")) return .{ .media_command = .next };
     if (std.mem.eql(u8, name, "transport.previous")) return .{ .media_command = .previous };
     if (std.mem.eql(u8, name, "transport.queue")) return .toggle_queue;
+    if (std.mem.eql(u8, name, "library.import_dropped")) return .import_dropped;
     return null;
 }
 
@@ -391,12 +405,22 @@ fn shimStart(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
 fn shimEvent(context: *anyopaque, runtime: *native_sdk.Runtime, event: native_sdk.Event) anyerror!void {
     const shim = HostShim.from(context);
     try shim.inner.event(runtime, event);
+    // Window drops: the paths live only for this event, so stage a copy
+    // and hand the import to the model as an ordinary command.
+    switch (event) {
+        .files_dropped => |drop| if (model_mod.stageDroppedPaths(drop.paths)) {
+            try shim.inner.event(runtime, .{ .command = .{ .name = "library.import_dropped" } });
+        },
+        else => {},
+    }
     try shim.afterEvent(runtime);
 }
 
 fn shimStop(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
     const shim = HostShim.from(context);
     host_services = null;
+    // Quitting inside the Undo window makes the removal final.
+    model_mod.commitRemoval(&shim.ui.model);
     return shim.inner.stop_fn.?(shim.inner.context, runtime);
 }
 
@@ -436,6 +460,7 @@ var host_shim: HostShim = undefined;
 pub fn main(init: std.process.Init) !void {
     registerIcons();
     var model: Model = .{};
+    model.lang = locale.preferredLang();
     // Fresh shuffle order per launch; update itself never reads entropy.
     init.io.random(std.mem.asBytes(&model.shuffle_rng));
     var data_dir_buffer: [model_mod.max_store_path]u8 = undefined;
@@ -503,5 +528,7 @@ test {
     _ = @import("tests.zig");
     _ = @import("metadata.zig");
     _ = @import("ui_font.zig");
+    _ = @import("strings.zig");
+    _ = @import("locale.zig");
     _ = @import("media_session.zig");
 }

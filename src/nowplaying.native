@@ -8,9 +8,9 @@
      in the assets-not-prepared notice so the user knows what failed.
 
      Three equal-balance zones (Apple Music / Spotify convention):
-       leading  — cover + title/artist
+       leading  — cover + title/artist (press: show the playing album)
        center   — prev / play-pause / next (the only primary filled control)
-       trailing — play-mode, volume, always-visible queue toggle
+       trailing — shuffle, repeat, mute + volume, always-visible queue toggle
      Matching grow on the leading and trailing rows keeps the transport
      optically mid-bar; utilities stay discoverable at the trailing edge.
      Uniform gaps inside each zone (no asymmetric prev↔play vs play↔next).
@@ -22,7 +22,9 @@
   <!-- No hairline above the transport: chrome-vs-page fill already
        separates the band (shadows-over-borders). -->
   <row height="80" padding="14" gap="16" cross="center" label="Now playing bar">
-    <row grow="1" gap="12" cross="center" label="Now playing track">
+    <!-- The leading zone is one hit target: it opens the playing album
+         at the playing track. -->
+    <row grow="1" gap="12" cross="center" on-press="reveal_now_playing" label="{strShowNowPlaying}">
       <avatar image="{nowPlayingCover}" width="52" height="52" radius="md" label="Now playing cover">{nowPlayingInitials}</avatar>
       <column grow="1" gap="2">
         <text label="Now playing title">{nowPlayingTitle}</text>
@@ -30,17 +32,34 @@
       </column>
     </row>
     <row gap="8" cross="center" label="Transport">
-      <button variant="ghost" icon="skip-back" disabled="{idle}" on-press="prev_track" label="Previous track"></button>
-      <button variant="primary" icon="{playPauseIcon}" on-press="toggle_play" label="Play or pause"></button>
-      <button variant="ghost" icon="skip-forward" disabled="{idle}" on-press="next_track" label="Next track"></button>
+      <button variant="ghost" icon="skip-back" disabled="{idle}" on-press="prev_track" label="{strPreviousTrack}"></button>
+      <button variant="primary" icon="{playPauseIcon}" on-press="toggle_play" label="{strPlayOrPause}"></button>
+      <button variant="ghost" icon="skip-forward" disabled="{idle}" on-press="next_track" label="{strNextTrack}"></button>
     </row>
-    <row grow="1" gap="10" cross="center" main="end" label="Playback utilities">
-      <button variant="ghost" icon="{playModeIcon}" on-press="cycle_play_mode" label="{playModeLabel}"></button>
-      <row gap="6" cross="center" label="Volume">
-        <icon name="volume" width="14" height="14" foreground="text_muted" />
-        <slider width="88" value="{volumeFraction}" on-change="volume_changed" label="Volume" />
+    <!-- Shuffle and repeat are two controls (Apple Music's pair): each
+         shows its own on/off state, so nothing has to be read off a
+         cycling glyph. -->
+    <row grow="1" gap="6" cross="center" main="end" label="Playback utilities">
+      <!-- On = accent icon. The theme gives a selected ghost button no
+           visible fill, so state rides the ink instead; `foreground`
+           only takes literal tokens, hence an <if> pair per control. -->
+      <if test="{shuffle}">
+        <button variant="ghost" icon="shuffle" foreground="accent" selected="true" on-press="toggle_shuffle" label="{shuffleLabel}"></button>
+      </if>
+      <if test="{shuffleOff}">
+        <button variant="ghost" icon="shuffle" on-press="toggle_shuffle" label="{shuffleLabel}"></button>
+      </if>
+      <if test="{repeatActive}">
+        <button variant="ghost" icon="{repeatIcon}" foreground="accent" selected="true" on-press="cycle_repeat" label="{repeatLabel}"></button>
+      </if>
+      <if test="{repeatOff}">
+        <button variant="ghost" icon="{repeatIcon}" on-press="cycle_repeat" label="{repeatLabel}"></button>
+      </if>
+      <row gap="2" cross="center" label="{strVolume}">
+        <button size="sm" variant="ghost" icon="{volumeIcon}" on-press="toggle_mute" label="{muteLabel}"></button>
+        <slider width="88" value="{volumeFraction}" on-change="volume_changed" label="{strVolume}" />
       </row>
-      <button variant="ghost" icon="app:queue" selected="{queue_open}" on-press="toggle_queue" label="Toggle play-next queue"></button>
+      <button variant="ghost" icon="app:queue" selected="{queue_open}" on-press="toggle_queue" label="{strToggleQueue}"></button>
     </row>
   </row>
 </column>

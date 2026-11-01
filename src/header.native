@@ -19,11 +19,11 @@
          trailing corner. -->
     <spacer grow="1" />
     <stack>
-      <button size="sm" variant="ghost" icon="ellipsis" selected="{header_menu_open}" on-press="toggle_header_menu" label="More"></button>
+      <button size="sm" variant="ghost" icon="ellipsis" selected="{header_menu_open}" on-press="toggle_header_menu" label="{strMore}"></button>
       <if test="{header_menu_open}">
         <dropdown-menu anchor="below" anchor-alignment="end" anchor-offset="4" on-dismiss="close_header_menu">
-          <menu-item icon="music" on-press="add_music">Add Song</menu-item>
-          <menu-item icon="folder" on-press="import_album">Add Album</menu-item>
+          <menu-item icon="music" on-press="add_music">{strAddSong}</menu-item>
+          <menu-item icon="folder" on-press="import_album">{strAddAlbum}</menu-item>
           <menu-item icon="{themeIcon}" on-press="toggle_theme">{themeLabel}</menu-item>
         </dropdown-menu>
       </if>

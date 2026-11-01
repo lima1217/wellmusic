@@ -8,6 +8,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const model_mod = @import("model.zig");
+const strings = @import("strings.zig");
 
 const canvas = native_sdk.canvas;
 
@@ -93,7 +94,7 @@ pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
     if (model.isEditingAlbum()) {
         return ui.el(.stack, .{ .grow = 1 }, .{
             shell,
-            editAlbumDialog(ui, model),
+            editDialog(ui, model, .album),
         });
     }
     if (!model.isEditingTrack()) return shell;
@@ -101,85 +102,53 @@ pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
     // dismisses through `on_dismiss` without saving.
     return ui.el(.stack, .{ .grow = 1 }, .{
         shell,
-        editTrackDialog(ui, model),
+        editDialog(ui, model, .track),
     });
 }
 
-fn editTrackDialog(ui: *Ui, model: *const Model) Ui.Node {
-    return ui.el(.dialog, .{
-        .width = 420,
-        .padding = 20,
-        .on_dismiss = .close_edit_track,
-        .semantics = .{ .label = "Edit song" },
-    }, .{
-        ui.column(.{ .gap = 14 }, .{
-            ui.text(.{}, "Edit Song"),
-            ui.column(.{ .gap = 6 }, .{
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Title"),
-                ui.textField(.{
-                    .text = model.editTitle(),
-                    .placeholder = "Song title",
-                    .on_input = Ui.inputMsg(.edit_title),
-                    .on_submit = .save_edit_track,
-                    .autofocus = true,
-                    .grow = 1,
-                    .semantics = .{ .label = "Song title" },
-                }),
-            }),
-            ui.column(.{ .gap = 6 }, .{
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Artist"),
-                ui.textField(.{
-                    .text = model.editArtist(),
-                    .placeholder = "Artist name",
-                    .on_input = Ui.inputMsg(.edit_artist),
-                    .on_submit = .save_edit_track,
-                    .grow = 1,
-                    .semantics = .{ .label = "Song artist" },
-                }),
-            }),
-            ui.row(.{ .gap = 8, .main = .end }, .{
-                ui.button(.{ .variant = .ghost, .on_press = .close_edit_track }, "Cancel"),
-                ui.button(.{ .variant = .primary, .on_press = .save_edit_track }, "Save"),
-            }),
-        }),
-    });
-}
+const EditKind = enum { track, album };
 
-fn editAlbumDialog(ui: *Ui, model: *const Model) Ui.Node {
+/// The edit-song / edit-album dialog: one shape, two vocabularies.
+fn editDialog(ui: *Ui, model: *const Model, kind: EditKind) Ui.Node {
+    const save: Msg = if (kind == .track) .save_edit_track else .save_edit_album;
+    const close: Msg = if (kind == .track) .close_edit_track else .close_edit_album;
+    const heading = model.str(if (kind == .track) .edit_song else .edit_album);
+    const title_hint = model.str(if (kind == .track) .song_title else .album_title);
+    const artist_label = model.str(if (kind == .track) .song_artist else .album_artist);
     return ui.el(.dialog, .{
         .width = 420,
         .padding = 20,
-        .on_dismiss = .close_edit_album,
-        .semantics = .{ .label = "Edit album" },
+        .on_dismiss = close,
+        .semantics = .{ .label = heading },
     }, .{
         ui.column(.{ .gap = 14 }, .{
-            ui.text(.{}, "Edit Album"),
+            ui.text(.{}, heading),
             ui.column(.{ .gap = 6 }, .{
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Title"),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.title)),
                 ui.textField(.{
                     .text = model.editTitle(),
-                    .placeholder = "Album title",
+                    .placeholder = title_hint,
                     .on_input = Ui.inputMsg(.edit_title),
-                    .on_submit = .save_edit_album,
+                    .on_submit = save,
                     .autofocus = true,
                     .grow = 1,
-                    .semantics = .{ .label = "Album title" },
+                    .semantics = .{ .label = title_hint },
                 }),
             }),
             ui.column(.{ .gap = 6 }, .{
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Artist"),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.artist)),
                 ui.textField(.{
                     .text = model.editArtist(),
-                    .placeholder = "Artist name",
+                    .placeholder = model.str(.artist_name),
                     .on_input = Ui.inputMsg(.edit_artist),
-                    .on_submit = .save_edit_album,
+                    .on_submit = save,
                     .grow = 1,
-                    .semantics = .{ .label = "Album artist" },
+                    .semantics = .{ .label = artist_label },
                 }),
             }),
             ui.row(.{ .gap = 8, .main = .end }, .{
-                ui.button(.{ .variant = .ghost, .on_press = .close_edit_album }, "Cancel"),
-                ui.button(.{ .variant = .primary, .on_press = .save_edit_album }, "Save"),
+                ui.button(.{ .variant = .ghost, .on_press = close }, model.str(.cancel)),
+                ui.button(.{ .variant = .primary, .on_press = save }, model.str(.save)),
             }),
         }),
     });
@@ -226,24 +195,24 @@ fn pageBand(ui: *Ui, child: Ui.Node) Ui.Node {
 fn queuePanel(ui: *Ui, model: *const Model) Ui.Node {
     const rows = model.queuedTracks(ui.arena);
     return chromeBand(ui, ui.column(.{
-        .semantics = .{ .label = "Playlist" },
+        .semantics = .{ .label = model.str(.playlist) },
     }, .{
         // No top hairline: chrome-vs-page fill separates the band.
         ui.row(.{ .padding = 12, .gap = 12, .cross = .center }, .{
-            ui.text(.{ .grow = 1 }, ui.fmt("Playlist · {d}", .{rows.len})),
+            ui.text(.{ .grow = 1 }, strings.playlistHeading(ui.arena, model.lang, rows.len)),
             if (rows.len > 0)
-                ui.button(.{ .variant = .ghost, .on_press = .clear_queue }, "Clear")
+                ui.button(.{ .variant = .ghost, .on_press = .clear_queue }, model.str(.playlist_clear))
             else
                 ui.el(.stack, .{}, .{}),
         }),
         if (rows.len == 0)
             ui.column(.{ .padding = 12, .gap = 4 }, .{
-                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Playlist is empty."),
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Play an album, double-click a track, or right-click → Play Next"),
+                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, model.str(.playlist_empty)),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.playlist_empty_hint)),
             })
         else
-            ui.column(.{ .padding = 12, .gap = 2 }, .{
-                ui.each(rows, queueRowKey, queueRow),
+            ui.column(.{ .padding = 8, .gap = 0 }, .{
+                ui.eachCtx(model, rows, queueRowKey, queueRow),
             }),
     }));
 }
@@ -252,25 +221,30 @@ fn queueRowKey(row: *const model_mod.TrackRow) canvas.UiKey {
     return canvas.uiKey(row.id);
 }
 
-fn queueRow(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
-    return ui.row(.{
-        // 40pt: the desktop hit-area floor — the Remove control is a
-        // default-height button, and the row must clear it without
-        // clipping.
+/// A pressable playlist row: a click plays that entry (or toggles pause
+/// on the loaded one), the × removes it.
+fn queueRow(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui.Node {
+    return ui.el(.list_item, .{
+        // 40pt: the desktop hit-area floor, clearing the × button.
         .height = 40,
+        .padding = 4,
         .gap = 10,
         .cross = .center,
-        .semantics = .{ .label = ui.fmt("Playlist {s}", .{row.title}) },
+        .on_press = Msg{ .play_track = row.id },
+        .semantics = .{ .role = .listitem, .label = strings.playlistRowLabel(ui.arena, model.lang, row.title) },
     }, .{
+        trackIndicator(ui, row),
         ui.column(.{ .gap = 1, .grow = 1 }, .{
             ui.text(.{ .wrap = false, .style_tokens = if (row.now) .{ .foreground = .accent } else .{} }, row.title),
             ui.text(.{ .size = .sm, .wrap = false, .style_tokens = .{ .foreground = .text_muted } }, row.subtitle),
         }),
         ui.button(.{
             .variant = .ghost,
+            .size = .sm,
+            .icon = "x",
             .on_press = Msg{ .remove_queued = row.id },
-            .semantics = .{ .label = "Remove from playlist" },
-        }, "Remove"),
+            .semantics = .{ .label = model.str(.remove_from_playlist) },
+        }, ""),
     });
 }
 
@@ -279,13 +253,22 @@ fn contentView(ui: *Ui, model: *const Model) Ui.Node {
         albumDetailView(ui, model, album_id)
     else
         albumGridView(ui, model);
-    // Background import progress rides above the page so it shows on the
-    // grid and on the album that is filling in alike.
-    const status = model.importStatus(ui.arena);
+    // Import progress / results and the removal Undo ride above the page,
+    // so they show on the grid and on an album page alike.
+    const status = model.noticeText(ui.arena);
     if (status.len == 0) return content;
     return ui.column(.{ .grow = 1 }, .{
-        ui.row(.{ .padding = 12, .cross = .center, .semantics = .{ .label = "Import progress" } }, .{
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, status),
+        ui.row(.{ .padding = 8, .gap = 8, .cross = .center, .semantics = .{ .label = model.str(.import_progress) } }, .{
+            ui.spacer(4),
+            ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, status),
+            if (model.noticeCanUndo())
+                ui.button(.{ .variant = .ghost, .size = .sm, .on_press = .undo_remove }, model.str(.undo))
+            else
+                ui.el(.stack, .{}, .{}),
+            if (model.import_total == 0)
+                ui.button(.{ .variant = .ghost, .size = .sm, .icon = "x", .on_press = .dismiss_notice, .semantics = .{ .label = model.str(.dismiss) } }, "")
+            else
+                ui.el(.stack, .{}, .{}),
         }),
         content,
     });
@@ -302,15 +285,17 @@ fn albumGridView(ui: *Ui, model: *const Model) Ui.Node {
         .grow = 1,
         .value = model.grid_scroll,
         .on_scroll = Ui.scrollMsg(.grid_scrolled),
-        .semantics = .{ .label = "Album grid" },
+        .semantics = .{ .label = model.str(.album_grid) },
     }, ui.column(.{ .padding = content_padding, .gap = 20 }, .{
-        if (cells.len == 0) emptyState(ui, model) else albumGrid(ui, gridFit(model.canvas_width), cells),
+        if (cells.len == 0) emptyState(ui, model) else albumGrid(ui, model, gridFit(model.canvas_width), cells),
     }));
 }
 
 /// The shared adaptive grid body: one bare tile per visible album, sized
 /// by the caller's fit.
-fn albumGrid(ui: *Ui, fit: GridFit, cells: []const model_mod.AlbumCell) Ui.Node {
+const TileCtx = struct { fit: GridFit, model: *const Model };
+
+fn albumGrid(ui: *Ui, model: *const Model, fit: GridFit, cells: []const model_mod.AlbumCell) Ui.Node {
     // The grid node is EXPLICITLY sized to its shown columns rather than
     // stretched to the row, because the engine divides the grid's width
     // evenly among its columns: an exact width makes each cell exactly
@@ -324,8 +309,8 @@ fn albumGrid(ui: *Ui, fit: GridFit, cells: []const model_mod.AlbumCell) Ui.Node 
         .width = row_width,
         .columns = columns,
         .gap = grid_gap,
-        .semantics = .{ .role = .list, .label = "Albums" },
-    }, ui.eachCtx(fit, cells, albumKey, albumTile));
+        .semantics = .{ .role = .list, .label = model.str(.albums) },
+    }, ui.eachCtx(TileCtx{ .fit = fit, .model = model }, cells, albumKey, albumTile));
 }
 
 fn albumKey(cell: *const model_mod.AlbumCell) canvas.UiKey {
@@ -342,13 +327,15 @@ fn albumKey(cell: *const model_mod.AlbumCell) canvas.UiKey {
 /// keyboard focus still draws the standard ring, and the whole tile —
 /// art and text — stays one hit target with the album-by-artist
 /// accessible label.
-fn albumTile(ui: *Ui, fit: GridFit, cell: *const model_mod.AlbumCell) Ui.Node {
-    const cover = fit.tile_width - tile_padding * 2;
+fn albumTile(ui: *Ui, ctx: TileCtx, cell: *const model_mod.AlbumCell) Ui.Node {
+    const model = ctx.model;
+    const cover = ctx.fit.tile_width - tile_padding * 2;
     const desktop_menu = [_]Ui.ContextMenuItem{
-        .{ .label = "Play Album", .msg = Msg{ .play_album = cell.id } },
-        .{ .label = "Open Album", .msg = Msg{ .open_album = cell.id } },
-        .{ .label = "Edit Info…", .msg = Msg{ .edit_album = cell.id } },
-        .{ .label = "Change Cover…", .msg = Msg{ .change_cover = cell.id } },
+        .{ .label = model.str(.play_album), .msg = Msg{ .play_album = cell.id } },
+        .{ .label = model.str(.open_album), .msg = Msg{ .open_album = cell.id } },
+        .{ .label = model.str(.edit_info), .msg = Msg{ .edit_album = cell.id } },
+        .{ .label = model.str(.change_cover), .msg = Msg{ .change_cover = cell.id } },
+        .{ .label = model.str(.remove_album), .msg = Msg{ .remove_album = cell.id } },
     };
     return ui.el(.list_item, .{
         // Height derives from width: the square cover plus the text
@@ -361,7 +348,7 @@ fn albumTile(ui: *Ui, fit: GridFit, cell: *const model_mod.AlbumCell) Ui.Node {
         .style = .{ .quiet_hover = true, .radius = tile_radius },
         .on_press = Msg{ .open_album = cell.id },
         .context_menu = &desktop_menu,
-        .semantics = .{ .role = .listitem, .label = ui.fmt("{s} by {s}", .{ cell.title, cell.artist }) },
+        .semantics = .{ .role = .listitem, .label = strings.albumByArtist(ui.arena, model.lang, cell.title, cell.artist) },
     }, .{
         // list_item flows children horizontally; the single grown column
         // carries the vertical cover-over-text stack.
@@ -371,16 +358,31 @@ fn albumTile(ui: *Ui, fit: GridFit, cell: *const model_mod.AlbumCell) Ui.Node {
                 .width = cover,
                 .height = cover,
                 .style = .{ .radius = cover_radius },
-                .semantics = .{ .label = ui.fmt("{s} cover", .{cell.title}) },
+                .semantics = .{ .label = strings.coverLabel(ui.arena, model.lang, cell.title) },
             }, cell.initials),
             ui.column(.{ .gap = 1 }, .{
                 // One-line title/artist by design: elide behind a
                 // trailing ellipsis at the tile width, never wrap
                 // over the line below.
-                ui.text(.{ .wrap = false }, cell.title),
+                tileTitle(ui, cell),
                 ui.text(.{ .size = .sm, .wrap = false, .style_tokens = .{ .foreground = .text_muted } }, cell.artist),
             }),
         }),
+    });
+}
+
+/// The tile's title line. The album that is loaded in the transport
+/// leads with a small speaker — accent while it plays, muted while
+/// paused — so the grid answers "what's on?" at a glance.
+fn tileTitle(ui: *Ui, cell: *const model_mod.AlbumCell) Ui.Node {
+    if (!cell.now) return ui.text(.{ .wrap = false }, cell.title);
+    return ui.row(.{ .gap = 4, .cross = .center }, .{
+        ui.icon(.{
+            .width = 12,
+            .height = 12,
+            .style_tokens = .{ .foreground = if (cell.playing) .accent else .text_muted },
+        }, "volume"),
+        ui.text(.{ .wrap = false, .grow = 1, .style_tokens = if (cell.playing) .{ .foreground = .accent } else .{} }, cell.title),
     });
 }
 
@@ -395,7 +397,7 @@ fn addMenuControl(ui: *Ui, model: *const Model, size: canvas.WidgetSize, variant
             .icon = "plus",
             .selected = model.add_menu_open,
             .on_press = .toggle_add_menu,
-            .semantics = .{ .label = "Add to library" },
+            .semantics = .{ .label = model.str(.add_to_library) },
         }, ""),
         if (model.add_menu_open)
             ui.el(.dropdown_menu, .{
@@ -403,10 +405,10 @@ fn addMenuControl(ui: *Ui, model: *const Model, size: canvas.WidgetSize, variant
                 .anchor_alignment = .start,
                 .anchor_offset = 4,
                 .on_dismiss = .close_add_menu,
-                .semantics = .{ .label = "Add menu" },
+                .semantics = .{ .label = model.str(.add_menu) },
             }, .{
-                ui.el(.menu_item, .{ .icon = "music", .on_press = .add_music, .text = "Add Song" }, .{}),
-                ui.el(.menu_item, .{ .icon = "folder", .on_press = .import_album, .text = "Add Album" }, .{}),
+                ui.el(.menu_item, .{ .icon = "music", .on_press = .add_music, .text = model.str(.add_song) }, .{}),
+                ui.el(.menu_item, .{ .icon = "folder", .on_press = .import_album, .text = model.str(.add_album) }, .{}),
             })
         else
             ui.el(.stack, .{}, .{}),
@@ -421,10 +423,10 @@ fn emptyState(ui: *Ui, model: *const Model) Ui.Node {
         .padding = 24,
         .style = .{ .stroke_width = 0 },
         .style_tokens = .{ .background = .surface, .radius = .lg },
-        .semantics = .{ .label = "Empty library" },
+        .semantics = .{ .label = model.str(.library_empty) },
     }, ui.column(.{ .gap = 10 }, .{
-        ui.text(.{}, "Your library is empty"),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Add songs or import a folder as an album."),
+        ui.text(.{}, model.str(.library_empty)),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.library_empty_hint)),
         addMenuControl(ui, model, .default, .primary),
     }));
 }
@@ -438,25 +440,26 @@ fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
         .grow = 1,
         .value = model.detail_scroll,
         .on_scroll = Ui.scrollMsg(.detail_scrolled),
-        .semantics = .{ .label = "Album detail" },
+        .semantics = .{ .label = model.str(.album_detail) },
     }, ui.column(.{ .padding = content_padding, .gap = 20 }, .{
         ui.row(.{}, .{
-            backButton(ui),
+            backButton(ui, model),
             ui.spacer(1),
         }),
         ui.row(.{ .gap = 24 }, .{
             detailCover(ui, model, album, detail_cover_size),
             detailHeading(ui, model, album, rows.len),
         }),
-        trackList(ui, rows, "Album tracks"),
+        trackList(ui, model, rows),
     }));
 }
 
 /// The album detail cover with its desktop context menu.
 fn detailCover(ui: *Ui, model: *const Model, album: model_mod.Album, size: f32) Ui.Node {
     const desktop_menu = [_]Ui.ContextMenuItem{
-        .{ .label = "Edit Info…", .msg = Msg{ .edit_album = album.id } },
-        .{ .label = "Change Cover…", .msg = Msg{ .change_cover = album.id } },
+        .{ .label = model.str(.edit_info), .msg = Msg{ .edit_album = album.id } },
+        .{ .label = model.str(.change_cover), .msg = Msg{ .change_cover = album.id } },
+        .{ .label = model.str(.remove_album), .msg = Msg{ .remove_album = album.id } },
     };
     return ui.avatar(.{
         .image = model.coverFor(album.id),
@@ -466,7 +469,7 @@ fn detailCover(ui: *Ui, model: *const Model, album: model_mod.Album, size: f32) 
         // share one corner language (outline comes from the theme).
         .style = .{ .radius = cover_radius },
         .context_menu = &desktop_menu,
-        .semantics = .{ .label = ui.fmt("{s} cover", .{album.title}) },
+        .semantics = .{ .label = strings.coverLabel(ui.arena, model.lang, album.title) },
     }, album.initials);
 }
 
@@ -481,11 +484,11 @@ fn detailHeading(ui: *Ui, model: *const Model, album: model_mod.Album, track_cou
         .grow = 1,
         .main = .end,
     }, .{
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, "Album"),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.album_eyebrow)),
         AlbumTitleView.build(ui, model),
-        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, ui.fmt("{s} · {d} tracks", .{ album.artist, track_count })),
+        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, strings.trackSummary(ui.arena, model.lang, album.artist, track_count, model.albumDurationMs(album.id))),
         ui.row(.{ .gap = 8, .cross = .center }, .{
-            playAlbumButton(ui, album.id),
+            playAlbumButton(ui, model, album.id),
             ui.spacer(1),
         }),
     });
@@ -497,7 +500,7 @@ fn detailHeading(ui: *Ui, model: *const Model, album: model_mod.Album, track_cou
 /// enabled/disabled tint for free. (These replaced the old overlay-stack
 /// idiom the moment icon-in-button landed.) Both shells share the
 /// control.
-fn backButton(ui: *Ui) Ui.Node {
+fn backButton(ui: *Ui, model: *const Model) Ui.Node {
     // Icon-only chevron: visible label is empty; VoiceOver still gets
     // "Back to albums". `.default` size keeps the 40pt desktop hit-area
     // floor once the text no longer widens the control.
@@ -506,18 +509,18 @@ fn backButton(ui: *Ui) Ui.Node {
         .size = .default,
         .icon = "chevron-left",
         .on_press = .close_album,
-        .semantics = .{ .label = "Back to albums" },
+        .semantics = .{ .label = model.str(.back_to_albums) },
     }, "");
 }
 
-fn playAlbumButton(ui: *Ui, album_id: u8) Ui.Node {
+fn playAlbumButton(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
     // Icon-only: visible label is empty; VoiceOver still gets "Play album".
     return ui.button(.{
         .variant = .primary,
         .size = .default,
         .icon = "play",
         .on_press = Msg{ .play_album = album_id },
-        .semantics = .{ .label = "Play album" },
+        .semantics = .{ .label = model.str(.play_album) },
     }, "");
 }
 
@@ -525,10 +528,10 @@ fn playAlbumButton(ui: *Ui, album_id: u8) Ui.Node {
 
 /// Flat track rows with no inter-row gaps — the rows' washes are the
 /// only separation.
-fn trackList(ui: *Ui, rows: []const model_mod.TrackRow, label: []const u8) Ui.Node {
+fn trackList(ui: *Ui, model: *const Model, rows: []const model_mod.TrackRow) Ui.Node {
     return ui.el(.list, .{
-        .semantics = .{ .role = .list, .label = label },
-    }, ui.each(rows, trackKey, trackRowView));
+        .semantics = .{ .role = .list, .label = model.str(.album_tracks) },
+    }, ui.eachCtx(model, rows, trackKey, trackRowView));
 }
 
 fn trackKey(row: *const model_mod.TrackRow) canvas.UiKey {
@@ -543,20 +546,20 @@ fn trackKey(row: *const model_mod.TrackRow) canvas.UiKey {
 /// the filled Play Album button pairs with the accent, white under this
 /// theme in both schemes), stated per-widget through style tokens so
 /// the unselected rows keep their neutral hover/press washes.
-fn trackRowView(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
+fn trackRowView(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui.Node {
     // Context menus are copied into the tree during build; allocate the
     // item slice in the build arena so removable rows can carry a third
     // action without fighting fixed-size array types.
     const desktop_menu: []const Ui.ContextMenuItem = blk: {
         if (row.removable) {
             break :blk ui.arena.dupe(Ui.ContextMenuItem, &.{
-                .{ .label = "Play Next", .msg = Msg{ .queue_track = row.id } },
-                .{ .label = "Edit Info…", .msg = Msg{ .edit_track = row.id } },
-                .{ .label = "Remove from Library", .msg = Msg{ .remove_track = row.id } },
+                .{ .label = model.str(.play_next), .msg = Msg{ .queue_track = row.id } },
+                .{ .label = model.str(.edit_info), .msg = Msg{ .edit_track = row.id } },
+                .{ .label = model.str(.remove_from_library), .msg = Msg{ .remove_track = row.id } },
             }) catch &.{};
         }
         break :blk ui.arena.dupe(Ui.ContextMenuItem, &.{
-            .{ .label = "Play Next", .msg = Msg{ .queue_track = row.id } },
+            .{ .label = model.str(.play_next), .msg = Msg{ .queue_track = row.id } },
         }) catch &.{};
     };
     return ui.el(.list_item, .{
@@ -649,7 +652,8 @@ fn trackIndicator(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
 /// keeps every row's duration right edge aligned regardless of digit
 /// count ("8:05" vs "12:41"), sized for the widest plausible value.
 fn durationText(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
-    var node = ui.text(.{ .width = 44, .size = .sm, .style_tokens = rowMutedTokens(row) }, row.duration);
+    // 56pt fits "h:mm:ss" for the hour-long recordings ambient albums carry.
+    var node = ui.text(.{ .width = 56, .size = .sm, .style_tokens = rowMutedTokens(row) }, row.duration);
     node.widget.text_alignment = .end;
     return node;
 }
