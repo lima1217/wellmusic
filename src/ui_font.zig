@@ -13,8 +13,8 @@
 //! face in practice. The app package stays small; only
 //! the process RSS grows by the chosen face size.
 //!
-//! Boot skips registration when the restored library has no CJK text
-//! (`libraryNeedsCjkFont`). When a later import or edit brings the first
+//! Boot skips registration when neither the UI language nor the restored
+//! library needs CJK glyphs (`needsCjkFont`). When a later import or edit brings the first
 //! CJK text into a Latin-only session, main.zig registers the face late
 //! through `runtime.registerCanvasFont`; UiApp then re-measures every
 //! surface on the next frame.

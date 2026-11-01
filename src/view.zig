@@ -158,9 +158,47 @@ fn editDialog(ui: *Ui, model: *const Model, kind: EditKind) Ui.Node {
 /// the markup header bar (titlebar drag surface, chrome-inset padding),
 /// the content switch, and the markup now-playing rail — with an
 /// optional play-next queue panel above the transport.
+/// Horizontal room the notice leaves on each side of the header band: the
+/// traffic lights / chrome inset on the left, the `⋯` button on the right.
+const notice_side_inset: f32 = 120;
+
+/// The header band, carrying the notice line (import progress / results,
+/// removal Undo, skipped track) in its otherwise empty middle. A notice
+/// appearing or clearing therefore never shifts the page below — the page
+/// used to jump a row under the pointer each time.
+fn headerBand(ui: *Ui, model: *const Model) Ui.Node {
+    const header = CompiledHeaderView.build(ui, model);
+    const status = model.noticeText(ui.arena);
+    if (status.len == 0) return header;
+    return ui.el(.stack, .{}, .{
+        header,
+        ui.row(.{
+            .height = model.header_height,
+            .gap = 8,
+            .cross = .center,
+            .semantics = .{ .label = model.str(.import_progress) },
+        }, .{
+            // `ElementOptions` has only uniform `padding` in this SDK, so
+            // the side room is a fixed-width empty stack each way.
+            // (`ui.spacer(n)` is a GROW factor, not a width.)
+            ui.el(.stack, .{ .width = notice_side_inset + model.chrome_leading }, .{}),
+            ui.text(.{ .size = .sm, .grow = 1, .wrap = false, .text_alignment = .center, .style_tokens = .{ .foreground = .text_muted } }, status),
+            if (model.noticeCanUndo())
+                ui.button(.{ .variant = .ghost, .size = .sm, .on_press = .undo_remove }, model.str(.undo))
+            else
+                ui.el(.stack, .{}, .{}),
+            if (model.import_total == 0)
+                ui.button(.{ .variant = .ghost, .size = .sm, .icon = "x", .on_press = .dismiss_notice, .semantics = .{ .label = model.str(.dismiss) } }, "")
+            else
+                ui.el(.stack, .{}, .{}),
+            ui.el(.stack, .{ .width = notice_side_inset + model.chrome_trailing }, .{}),
+        }),
+    });
+}
+
 fn desktopShell(ui: *Ui, model: *const Model) Ui.Node {
     return ui.column(.{ .grow = 1 }, .{
-        chromeBand(ui, CompiledHeaderView.build(ui, model)),
+        chromeBand(ui, headerBand(ui, model)),
         // Paint the middle with the page token — layout backgrounds do
         // not fill, and relying on GPU clear alone left the body one
         // frame (or one rebuild path) behind chrome after a theme flip.
@@ -258,29 +296,10 @@ fn queueRow(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui.Nod
 }
 
 fn contentView(ui: *Ui, model: *const Model) Ui.Node {
-    const content = if (model.open_album) |album_id|
+    return if (model.open_album) |album_id|
         albumDetailView(ui, model, album_id)
     else
         albumGridView(ui, model);
-    // Import progress / results and the removal Undo ride above the page,
-    // so they show on the grid and on an album page alike.
-    const status = model.noticeText(ui.arena);
-    if (status.len == 0) return content;
-    return ui.column(.{ .grow = 1 }, .{
-        ui.row(.{ .padding = 8, .gap = 8, .cross = .center, .semantics = .{ .label = model.str(.import_progress) } }, .{
-            ui.spacer(4),
-            ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, status),
-            if (model.noticeCanUndo())
-                ui.button(.{ .variant = .ghost, .size = .sm, .on_press = .undo_remove }, model.str(.undo))
-            else
-                ui.el(.stack, .{}, .{}),
-            if (model.import_total == 0)
-                ui.button(.{ .variant = .ghost, .size = .sm, .icon = "x", .on_press = .dismiss_notice, .semantics = .{ .label = model.str(.dismiss) } }, "")
-            else
-                ui.el(.stack, .{}, .{}),
-        }),
-        content,
-    });
 }
 
 // ------------------------------------------------------------- album grid

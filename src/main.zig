@@ -121,11 +121,12 @@ var ui_font_reg_count: usize = 0;
 var ui_font_bytes_released: bool = false;
 var media_session_warmed: bool = false;
 
-/// Register a CJK-capable face at launch only when the catalog needs it;
-/// empty and Latin-only libraries skip the CJK face (~22 MiB in practice). The first CJK
-/// import later in the session registers it then (`registerLateUiFont`).
+/// Register a CJK-capable face at launch only when the UI language or the
+/// catalog needs it; an English UI over a Latin-only library skips the
+/// face (~22 MiB in practice). The first CJK import later in the session
+/// registers it then (`registerLateUiFont`).
 fn prepareUiFontsIfNeeded(model: *const Model) void {
-    if (!model_mod.libraryNeedsCjkFont(model)) {
+    if (!model_mod.needsCjkFont(model)) {
         ui_font_reg_count = 0;
         return;
     }
@@ -385,7 +386,7 @@ const HostShim = struct {
         const revision = shim.ui.model.library_revision;
         if (revision != shim.font_checked_revision) {
             shim.font_checked_revision = revision;
-            if (!ui_font.ready() and model_mod.libraryNeedsCjkFont(&shim.ui.model)) {
+            if (!ui_font.ready() and model_mod.needsCjkFont(&shim.ui.model)) {
                 registerLateUiFont(runtime);
             }
         }

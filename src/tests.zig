@@ -1728,6 +1728,21 @@ test "pause ramps the volume down before the player stops" {
     try testing.expectEqual(model_mod.fade_steps - 2, model.fade_step);
 }
 
+test "the pause ramp is flat at both ends" {
+    var model: Model = .{};
+    model.volume = 1;
+    model.fade = .out;
+    const expected = [_]f32{ 1.0, 0.9330, 0.75, 0.5, 0.25, 0.0670, 0.0 };
+    for (expected, 0..) |gain, k| {
+        model.fade_step = @intCast(k);
+        try testing.expectApproxEqAbs(gain, model_mod.fadeLevel(&model), 0.001);
+    }
+    // Reversal continuity: in(steps - k) == out(k).
+    model.fade = .in;
+    model.fade_step = model_mod.fade_steps - 2;
+    try testing.expectApproxEqAbs(@as(f32, 0.75), model_mod.fadeLevel(&model), 0.001);
+}
+
 test "shuffle album turns shuffle on and starts the album" {
     var model: Model = .{};
     const album = try seedAlbum(&model, 4);
@@ -1812,4 +1827,32 @@ test "reduce motion zeroes every motion duration" {
             try testing.expectEqual(@as(u32, 0), motion.slow_ms);
         }
     }
+}
+
+test "undo survives a library save that was queued behind another" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var model: Model = .{};
+    model.setStorePath("/tmp/wellmusic-undo-queue/library.txt");
+    try testing.expect(model.addUserTrack("/tmp/demo/q1.mp3"));
+    try testing.expect(model.addUserTrack("/tmp/demo/q2.mp3"));
+    try testing.expect(model.addUserTrack("/tmp/demo/q3.mp3"));
+    // First removal starts a write; the second lands while it is in flight.
+    applyFx(&model, .{ .remove_track = model.user_tracks[2].id }, &fx);
+    applyFx(&model, .{ .remove_track = model.user_tracks[1].id }, &fx);
+    try testing.expect(model.noticeCanUndo());
+    // The first write completes and the queued save flushes.
+    applyFx(&model, .{ .library_done = .{ .key = model_mod.library_write_key, .op = .write } }, &fx);
+    try testing.expect(model.noticeCanUndo());
+    applyFx(&model, .undo_remove, &fx);
+    try testing.expectEqual(@as(usize, 2), model.user_track_count);
+}
+
+test "a Chinese UI needs the CJK face even over a Latin-only library" {
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/demo/latin-only.mp3"));
+    try testing.expect(!model_mod.needsCjkFont(&model));
+    model.lang = .zh;
+    try testing.expect(model_mod.needsCjkFont(&model));
 }

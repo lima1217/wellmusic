@@ -1918,6 +1918,14 @@ fn lessIgnoreCase(a: []const u8, b: []const u8) bool {
 
 pub fn persistLibrary(model: *Model, fx: *Effects) void {
     model.library_revision +%= 1;
+    writeLibrary(model, fx);
+}
+
+/// Write the catalog as it is now. Separate from `persistLibrary` so the
+/// flush of a save queued behind an in-flight write is not counted as a
+/// second catalog change — that bump withdrew Undo after two quick
+/// removals.
+fn writeLibrary(model: *Model, fx: *Effects) void {
     if (model.store_path_len == 0) return;
     if (model.store_write_inflight) {
         model.save_pending = true;
@@ -2526,6 +2534,13 @@ fn requestCoverLoad(model: *Model, fx: *Effects, album_id: u8) void {
 /// True when any catalog string needs a CJK-capable face. Used at boot
 /// to skip the system CJK face for Latin-only libraries, and after
 /// each catalog change to register it late (main.zig `HostShim`).
+/// The CJK face is needed when the UI itself speaks Chinese, or when any
+/// catalog string is CJK. Checking the catalog alone left a Chinese UI over
+/// a Latin-only library rendering every label as tofu.
+pub fn needsCjkFont(model: *const Model) bool {
+    return model.lang == .zh or libraryNeedsCjkFont(model);
+}
+
 pub fn libraryNeedsCjkFont(model: *const Model) bool {
     for (model.user_albums[0..model.user_album_count]) |*album| {
         if (textHasCjk(album.title())) return true;
@@ -2968,12 +2983,17 @@ const fade_step_ms: u64 = 25;
 pub const fade_steps: u8 = 6;
 pub const Fade = enum { none, out, in };
 
-fn fadeLevel(model: *const Model) f32 {
+pub fn fadeLevel(model: *const Model) f32 {
     const fraction = @as(f32, @floatFromInt(model.fade_step)) / @as(f32, @floatFromInt(fade_steps));
+    // Raised cosine: flat at both ends, so neither the start of the ramp
+    // nor its arrival at silence leaves a corner in the waveform. The two
+    // directions mirror each other exactly — out(k) == in(fade_steps - k) —
+    // which keeps a mid-ramp reversal (startFade) continuous.
+    const rising = 0.5 - 0.5 * @cos(std.math.pi * fraction);
     return model.effectiveVolume() * switch (model.fade) {
         .none => 1,
-        .out => 1 - fraction,
-        .in => fraction,
+        .out => 1 - rising,
+        .in => rising,
     };
 }
 
@@ -3575,7 +3595,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.store_write_inflight = false;
                 if (result.outcome == .ok and model.save_pending) {
                     model.save_pending = false;
-                    persistLibrary(model, fx);
+                    writeLibrary(model, fx);
                 }
             },
         },
