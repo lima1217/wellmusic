@@ -1969,3 +1969,39 @@ test "the quit flush writes the library atomically" {
     model_mod.loadLibrarySync(&restored);
     try testing.expectEqual(@as(usize, 1), restored.user_track_count);
 }
+
+test "icon-only transport controls carry tooltips naming their state" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var model: Model = .{};
+    var tree = try buildTree(arena_state.allocator(), &model);
+    try testing.expect(findTooltip(tree.root, "Shuffle: off"));
+    try testing.expect(findTooltip(tree.root, "Repeat: all"));
+    try testing.expect(findTooltip(tree.root, "Mute"));
+    try testing.expect(findTooltip(tree.root, "Toggle play-next queue"));
+
+    apply(&model, .toggle_shuffle);
+    apply(&model, .cycle_repeat);
+    apply(&model, .toggle_mute);
+    model.lang = .zh;
+    tree = try buildTree(arena_state.allocator(), &model);
+    try testing.expect(findTooltip(tree.root, "随机播放：开"));
+    try testing.expect(findTooltip(tree.root, "循环：单曲"));
+    try testing.expect(findTooltip(tree.root, "取消静音"));
+}
+
+fn findTooltip(widget: canvas.Widget, text: []const u8) bool {
+    if (widget.kind == .tooltip and tooltipHasText(widget, text)) return true;
+    for (widget.children) |child| {
+        if (findTooltip(child, text)) return true;
+    }
+    return false;
+}
+
+fn tooltipHasText(widget: canvas.Widget, text: []const u8) bool {
+    if (std.mem.eql(u8, widget.text, text)) return true;
+    for (widget.children) |child| {
+        if (tooltipHasText(child, text)) return true;
+    }
+    return false;
+}

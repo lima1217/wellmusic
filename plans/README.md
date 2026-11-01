@@ -25,7 +25,7 @@ decisions respected, not reported: no track-change enter motion (removed in
 6be6efe for idle cost), instant album open/close and queue panel toggle
 (frequent navigation).
 
-Missed opportunity, not planned: the icon-only transport controls (shuffle,
-repeat, mute, playlist) have accessibility labels but no hover tooltip; the
-SDK's `tooltip` attribute would make them discoverable, delay on the first
-hover only.
+Missed opportunity, since done outside the plans: the icon-only transport
+controls (shuffle, repeat, mute, playlist) now carry anchored tooltips that
+name their current state; the SDK's warm window shows a neighbour's tooltip
+without a second delay.

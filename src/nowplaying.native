@@ -42,24 +42,41 @@
     <row grow="1" gap="6" cross="center" main="end" label="Playback utilities">
       <!-- On = accent icon. The theme gives a selected ghost button no
            visible fill, so state rides the ink instead; `foreground`
-           only takes literal tokens, hence an <if> pair per control. -->
-      <if test="{shuffle}">
-        <button variant="ghost" icon="shuffle" foreground="accent" selected="true" on-press="toggle_shuffle" label="{shuffleLabel}"></button>
-      </if>
-      <if test="{shuffleOff}">
-        <button variant="ghost" icon="shuffle" on-press="toggle_shuffle" label="{shuffleLabel}"></button>
-      </if>
-      <if test="{repeatActive}">
-        <button variant="ghost" icon="{repeatIcon}" foreground="accent" selected="true" on-press="cycle_repeat" label="{repeatLabel}"></button>
-      </if>
-      <if test="{repeatOff}">
-        <button variant="ghost" icon="{repeatIcon}" on-press="cycle_repeat" label="{repeatLabel}"></button>
-      </if>
+           only takes literal tokens, hence an <if> pair per control.
+           Each icon-only control sits in a stack with an anchored
+           tooltip naming its current state (the same text as its
+           accessibility label). The runtime shows it on hover after the
+           theme's delay, and instantly for a neighbour within the warm
+           window, so sweeping along the row does not wait each time. -->
+      <stack>
+        <if test="{shuffle}">
+          <button variant="ghost" icon="shuffle" foreground="accent" selected="true" on-press="toggle_shuffle" label="{shuffleLabel}"></button>
+        </if>
+        <if test="{shuffleOff}">
+          <button variant="ghost" icon="shuffle" on-press="toggle_shuffle" label="{shuffleLabel}"></button>
+        </if>
+        <tooltip anchor="above">{shuffleLabel}</tooltip>
+      </stack>
+      <stack>
+        <if test="{repeatActive}">
+          <button variant="ghost" icon="{repeatIcon}" foreground="accent" selected="true" on-press="cycle_repeat" label="{repeatLabel}"></button>
+        </if>
+        <if test="{repeatOff}">
+          <button variant="ghost" icon="{repeatIcon}" on-press="cycle_repeat" label="{repeatLabel}"></button>
+        </if>
+        <tooltip anchor="above">{repeatLabel}</tooltip>
+      </stack>
       <row gap="2" cross="center" label="{strVolume}">
-        <button size="sm" variant="ghost" icon="{volumeIcon}" on-press="toggle_mute" label="{muteLabel}"></button>
+        <stack>
+          <button size="sm" variant="ghost" icon="{volumeIcon}" on-press="toggle_mute" label="{muteLabel}"></button>
+          <tooltip anchor="above">{muteLabel}</tooltip>
+        </stack>
         <slider width="88" value="{volumeFraction}" on-change="volume_changed" label="{strVolume}" />
       </row>
-      <button variant="ghost" icon="app:queue" selected="{queue_open}" on-press="toggle_queue" label="{strToggleQueue}"></button>
+      <stack>
+        <button variant="ghost" icon="app:queue" selected="{queue_open}" on-press="toggle_queue" label="{strToggleQueue}"></button>
+        <tooltip anchor="above">{strToggleQueue}</tooltip>
+      </stack>
     </row>
   </row>
 </column>
