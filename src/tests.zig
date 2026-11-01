@@ -1668,3 +1668,137 @@ test "hour-long tracks show hours in their duration" {
     const rows = model.albumTrackRows(arena_state.allocator(), album);
     try testing.expectEqualStrings("6:15:04", rows[0].duration);
 }
+
+test "a track that fails to play skips to the next one" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 3);
+    applyFx(&model, .{ .play_album = album }, &fx);
+    const first = model.now.?;
+    applyFx(&model, .{ .audio_event = .{ .key = first, .kind = .failed } }, &fx);
+    try testing.expect(model.now != null and model.now.? != first);
+    try testing.expect(model.playing);
+    try testing.expectEqual(model_mod.Notice.skipped, model.notice);
+    try testing.expect(std.mem.indexOf(u8, try arenaText(&model), "mode-0") != null);
+}
+
+test "auto-skip gives up once every track has failed" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 3);
+    applyFx(&model, .{ .play_album = album }, &fx);
+    var guard: usize = 0;
+    while (model.now) |id| : (guard += 1) {
+        try testing.expect(guard < 10);
+        applyFx(&model, .{ .audio_event = .{ .key = id, .kind = .failed } }, &fx);
+    }
+    try testing.expect(model.assets_missing);
+    try testing.expect(!model.playing);
+}
+
+test "pause ramps the volume down before the player stops" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/demo/fade.mp3"));
+    applyFx(&model, .{ .play_track = model.user_tracks[0].id }, &fx);
+    applyFx(&model, .toggle_play, &fx);
+    try testing.expect(!model.playing);
+    try testing.expectEqual(model_mod.Fade.out, model.fade);
+    try testing.expect(fx.audio.playing); // still ramping
+    var i: usize = 0;
+    while (i < model_mod.fade_steps) : (i += 1) {
+        applyFx(&model, .{ .fade_tick = .{ .key = model_mod.fade_timer_key } }, &fx);
+    }
+    try testing.expectEqual(model_mod.Fade.none, model.fade);
+    try testing.expect(!fx.audio.playing);
+
+    // Resume ramps back up; a press mid-ramp reverses from where it is.
+    applyFx(&model, .toggle_play, &fx);
+    try testing.expectEqual(model_mod.Fade.in, model.fade);
+    applyFx(&model, .{ .fade_tick = .{ .key = model_mod.fade_timer_key } }, &fx);
+    applyFx(&model, .{ .fade_tick = .{ .key = model_mod.fade_timer_key } }, &fx);
+    applyFx(&model, .toggle_play, &fx);
+    try testing.expectEqual(model_mod.Fade.out, model.fade);
+    try testing.expectEqual(model_mod.fade_steps - 2, model.fade_step);
+}
+
+test "shuffle album turns shuffle on and starts the album" {
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 4);
+    apply(&model, .{ .shuffle_album = album });
+    try testing.expect(model.shuffle);
+    try testing.expect(model.playing);
+    try testing.expectEqual(@as(usize, 4), model.queue_len);
+}
+
+test "an image dropped on an album page becomes its cover" {
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 1);
+    model.open_album = album;
+    try testing.expect(model_mod.stageDroppedPaths(&.{"/tmp/demo/art.JPG"}));
+    apply(&model, .import_dropped);
+    try testing.expectEqualStrings("/tmp/demo/art.JPG", model.userAlbumById(album).?.coverPath());
+    try testing.expectEqual(@as(usize, 1), model.user_track_count);
+}
+
+test "the page and scroll the user left come back" {
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 2);
+    model.open_album = album;
+    model.grid_scroll = 120;
+    model.detail_scroll = 48;
+    var buffer: [model_mod.max_session_store_bytes]u8 = undefined;
+    const bytes = model.serializeSession(&buffer);
+
+    var restored: Model = .{};
+    _ = try seedAlbum(&restored, 2);
+    restored.applySessionView(bytes);
+    try testing.expectEqual(@as(?u8, album), restored.open_album);
+    try testing.expectEqual(@as(f32, 120), restored.grid_scroll);
+    try testing.expectEqual(@as(f32, 48), restored.detail_scroll);
+    // The full restore accepts (and leaves alone) the view keys.
+    try testing.expect(restored.restoreSession(bytes));
+
+    // An album that no longer exists is not reopened.
+    var empty: Model = .{};
+    empty.applySessionView(bytes);
+    try testing.expectEqual(@as(?u8, null), empty.open_album);
+}
+
+test "playlist entries move up, down, to the top and bottom" {
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 4);
+    apply(&model, .{ .play_album = album });
+    const ids = [_]u8{ model.queue[0], model.queue[1], model.queue[2], model.queue[3] };
+    apply(&model, .{ .move_queued = .{ .id = ids[2], .move = .up } });
+    try testing.expectEqualSlices(u8, &.{ ids[0], ids[2], ids[1], ids[3] }, model.queue[0..4]);
+    apply(&model, .{ .move_queued = .{ .id = ids[0], .move = .bottom } });
+    try testing.expectEqualSlices(u8, &.{ ids[2], ids[1], ids[3], ids[0] }, model.queue[0..4]);
+    apply(&model, .{ .move_queued = .{ .id = ids[3], .move = .top } });
+    try testing.expectEqualSlices(u8, &.{ ids[3], ids[2], ids[1], ids[0] }, model.queue[0..4]);
+    apply(&model, .{ .move_queued = .{ .id = ids[0], .move = .down } }); // already last
+    try testing.expectEqualSlices(u8, &.{ ids[3], ids[2], ids[1], ids[0] }, model.queue[0..4]);
+}
+
+test "selection shortcuts remove, queue, and reveal" {
+    const cmd: canvas.WidgetKeyboardModifiers = .{ .super = true };
+    const cmd_shift: canvas.WidgetKeyboardModifiers = .{ .super = true, .shift = true };
+    try testing.expectEqual(Msg.remove_selected, main.onKey(.{ .key = "Backspace", .phase = .key_down, .modifiers = cmd }).?);
+    try testing.expectEqual(Msg.reveal_now_playing, main.onKey(.{ .key = "l", .phase = .key_down, .modifiers = cmd }).?);
+    try testing.expectEqual(Msg.queue_selected, main.onKey(.{ .key = "N", .phase = .key_down, .modifiers = cmd_shift }).?);
+
+    var model: Model = .{};
+    try testing.expect(model.addUserTrack("/tmp/demo/sel-a.mp3"));
+    try testing.expect(model.addUserTrack("/tmp/demo/sel-b.mp3"));
+    model.selected = model.user_tracks[1].id;
+    apply(&model, .queue_selected);
+    try testing.expectEqual(@as(usize, 1), model.queue_len);
+    apply(&model, .remove_selected);
+    try testing.expectEqual(@as(usize, 1), model.user_track_count);
+}

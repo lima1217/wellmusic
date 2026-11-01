@@ -59,6 +59,11 @@ pub const Key = enum {
     playlist_empty,
     playlist_empty_hint,
     remove_from_playlist,
+    move_up,
+    move_down,
+    move_to_top,
+    move_to_bottom,
+    shuffle_album,
     // Dialogs
     edit_song,
     edit_album,
@@ -138,6 +143,11 @@ const table = std.enums.EnumArray(Key, Pair).init(.{
     .playlist_empty = .{ .en = "Playlist is empty.", .zh = "播放列表是空的。" },
     .playlist_empty_hint = .{ .en = "Play an album, double-click a track, or right-click → Play Next", .zh = "播放一张专辑、双击一首歌，或右键 → 下一首播放" },
     .remove_from_playlist = .{ .en = "Remove from playlist", .zh = "从播放列表移除" },
+    .move_up = .{ .en = "Move Up", .zh = "上移" },
+    .move_down = .{ .en = "Move Down", .zh = "下移" },
+    .move_to_top = .{ .en = "Move to Top", .zh = "移到最前" },
+    .move_to_bottom = .{ .en = "Move to Bottom", .zh = "移到最后" },
+    .shuffle_album = .{ .en = "Shuffle album", .zh = "随机播放专辑" },
     .edit_song = .{ .en = "Edit Song", .zh = "编辑歌曲" },
     .edit_album = .{ .en = "Edit Album", .zh = "编辑专辑" },
     .title = .{ .en = "Title", .zh = "标题" },
@@ -244,6 +254,13 @@ pub fn removedTracks(arena: std.mem.Allocator, lang: Lang, count: usize) []const
     return switch (lang) {
         .en => std.fmt.allocPrint(arena, "Removed {d} {s}", .{ count, if (count == 1) "song" else "songs" }) catch "",
         .zh => std.fmt.allocPrint(arena, "已移除 {d} 首", .{count}) catch "",
+    };
+}
+
+pub fn skippedTrack(arena: std.mem.Allocator, lang: Lang, title: []const u8) []const u8 {
+    return switch (lang) {
+        .en => std.fmt.allocPrint(arena, "Couldn’t play “{s}” — skipped to the next track", .{title}) catch "",
+        .zh => std.fmt.allocPrint(arena, "无法播放《{s}》，已跳到下一首", .{title}) catch "",
     };
 }
 

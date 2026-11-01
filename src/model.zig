@@ -487,6 +487,15 @@ pub const Msg = union(enum) {
     notice_expired: native_sdk.EffectTimer,
     /// Now-playing bar: open the playing album at the playing track.
     reveal_now_playing,
+    /// Album page: turn shuffle on and play the album from a random track.
+    shuffle_album: u8,
+    /// Volume ramp step while pausing or resuming (see `Fade`).
+    fade_tick: native_sdk.EffectTimer,
+    /// Cmd+Backspace / Cmd+Shift+N on the selected track.
+    remove_selected,
+    queue_selected,
+    /// Playlist row menu: reorder an entry.
+    move_queued: struct { id: u8, move: QueueMove },
     /// Persist library writes (reads are sync at launch via `loadLibrarySync`).
     library_done: native_sdk.EffectFileResult,
     /// Persist / restore playback session (now, queue, mode, volume).
@@ -513,6 +522,8 @@ pub const Msg = union(enum) {
         "library_hydrate", "cover_hydrate", "title_heal",
         "import_copied",  "import_dropped", "remove_album",  "undo_remove",
         "notice_expired", "volume_step",    "dismiss_notice",
+        "shuffle_album",  "fade_tick",      "remove_selected", "queue_selected",
+        "move_queued",
         "library_done",   "cover_done",     "volume_changed",
         "toggle_queue",   "remove_queued",  "clear_queue",
         "media_command",
@@ -697,6 +708,14 @@ pub const Model = struct {
     undo_revision: u32 = 0,
     /// Set while an undoable removal runs: keep media files on disk.
     defer_media_delete: bool = false,
+    /// Consecutive tracks that failed to play (auto-skip bound).
+    skip_streak: usize = 0,
+    /// Title of the last track auto-skipped, for its notice.
+    skipped_title_storage: [max_user_title]u8 = undefined,
+    skipped_title_len: usize = 0,
+    /// Pause / resume volume ramp in progress.
+    fade: Fade = .none,
+    fade_step: u8 = 0,
 
     /// Read by the ZIG-BUILT views (grid, detail, track rows), update
     /// logic, or main's launch wiring — never bound in markup — so
@@ -741,6 +760,8 @@ pub const Model = struct {
         "import_added",    "import_skipped", "import_failed",
         "notice",          "notice_added",   "notice_skipped", "notice_failed",
         "notice_removed",  "undo_snapshot",  "undo_revision",  "defer_media_delete",
+        "skip_streak",     "skipped_title_storage", "skipped_title_len", "skippedTitle",
+        "fade",            "fade_step",
         "noticeText",      "noticeCanUndo",  "effectiveVolume",
         "importStatus",
         "save_pending",
@@ -957,7 +978,18 @@ pub const Model = struct {
             .none => "",
             .import_result => strings.importResult(arena, model.lang, model.notice_added, model.notice_skipped, model.notice_failed),
             .removed => strings.removedTracks(arena, model.lang, model.notice_removed),
+            .skipped => strings.skippedTrack(arena, model.lang, model.skippedTitle()),
         };
+    }
+
+    pub fn skippedTitle(model: *const Model) []const u8 {
+        return model.skipped_title_storage[0..model.skipped_title_len];
+    }
+
+    fn setSkippedTitle(model: *Model, title_text: []const u8) void {
+        const kept = metadata.utf8Prefix(title_text, max_user_title);
+        @memcpy(model.skipped_title_storage[0..kept.len], kept);
+        model.skipped_title_len = kept.len;
     }
 
     pub fn noticeCanUndo(model: *const Model) bool {
@@ -1480,6 +1512,9 @@ pub const Model = struct {
         appendFmt(buffer, &len, "theme\t{s}\n", .{themePreferenceName(model.theme)});
         appendFmt(buffer, &len, "volume\t{d:.4}\n", .{std.math.clamp(model.volume, 0, 1)});
         appendFmt(buffer, &len, "queue_open\t{d}\n", .{@as(u8, if (model.queue_open) 1 else 0)});
+        appendFmt(buffer, &len, "open_album\t{d}\n", .{model.open_album orelse 0});
+        appendFmt(buffer, &len, "grid_scroll\t{d:.1}\n", .{model.grid_scroll});
+        appendFmt(buffer, &len, "detail_scroll\t{d:.1}\n", .{model.detail_scroll});
         appendFmt(buffer, &len, "queue", .{});
         for (model.queue[0..model.queue_len]) |id| {
             appendFmt(buffer, &len, "\t{d}", .{id});
@@ -1541,6 +1576,9 @@ pub const Model = struct {
             } else if (std.mem.eql(u8, key, "queue_open")) {
                 const text = parts.next() orelse return false;
                 queue_open = (std.fmt.parseInt(u8, text, 10) catch return false) != 0;
+            } else if (std.mem.eql(u8, key, "open_album") or std.mem.eql(u8, key, "grid_scroll") or std.mem.eql(u8, key, "detail_scroll")) {
+                // View keys apply before the first frame (`applySessionView`).
+                continue;
             } else if (std.mem.eql(u8, key, "queue")) {
                 while (parts.next()) |id_text| {
                     if (id_text.len == 0) continue;
@@ -1572,6 +1610,27 @@ pub const Model = struct {
             model.session_resume_playing = playing;
         }
         return true;
+    }
+
+    /// The page the user left: the open album (if it still exists) and
+    /// both scroll offsets. Unknown or malformed lines are ignored.
+    pub fn applySessionView(model: *Model, bytes: []const u8) void {
+        var lines = std.mem.splitScalar(u8, bytes, '\n');
+        const header = lines.next() orelse return;
+        if (!std.mem.eql(u8, std.mem.trim(u8, header, " \r"), session_store_header)) return;
+        while (lines.next()) |raw| {
+            var parts = std.mem.splitScalar(u8, std.mem.trim(u8, raw, " \r"), '\t');
+            const key = parts.next() orelse continue;
+            const value = parts.next() orelse continue;
+            if (std.mem.eql(u8, key, "open_album")) {
+                const id = std.fmt.parseInt(u8, value, 10) catch continue;
+                if (id != 0 and model.userAlbumById(id) != null) model.open_album = id;
+            } else if (std.mem.eql(u8, key, "grid_scroll")) {
+                model.grid_scroll = @max(0, std.fmt.parseFloat(f32, value) catch continue);
+            } else if (std.mem.eql(u8, key, "detail_scroll")) {
+                model.detail_scroll = @max(0, std.fmt.parseFloat(f32, value) catch continue);
+            }
+        }
     }
 
     pub fn restoreLibrary(model: *Model, bytes: []const u8) bool {
@@ -2632,12 +2691,14 @@ pub fn loadCoverFromPath(model: *Model, fx: *Effects, album_id: u8) bool {
 
 /// The one-line notice under the header: an import's result, or a
 /// removal with Undo. Clears itself after a few seconds.
-pub const Notice = enum { none, import_result, removed };
+pub const Notice = enum { none, import_result, removed, skipped };
 pub const notice_timer_key: u64 = 45;
 const notice_import_ms: u64 = 4000;
 const notice_removed_ms: u64 = 6000;
 
 fn showNotice(model: *Model, fx: *Effects, kind: Notice, duration_ms: u64) void {
+    // A notice replacing the removal's Undo makes that removal final.
+    if (model.notice == .removed and kind != .removed) commitRemoval(model);
     model.notice = kind;
     fx.startTimer(.{
         .key = notice_timer_key,
@@ -2836,9 +2897,17 @@ fn importDropped(model: *Model, fx: *Effects) void {
     drop_inbox_len = 0;
     var lines = std.mem.splitScalar(u8, staged[0..len], '\n');
     var queued_loose = false;
+    var cover_set = false;
     while (lines.next()) |path| {
         if (path.len == 0) continue;
-        if (isDirectory(path)) {
+        if (isImagePath(path)) {
+            if (!cover_set) {
+                if (model.open_album) |album_id| {
+                    setCoverFromDrop(model, fx, album_id, path);
+                    cover_set = true;
+                }
+            }
+        } else if (isDirectory(path)) {
             importAlbumDir(model, fx, path);
         } else if (isAudioPath(path)) {
             if (queueImport(model, imported_album_id, path)) queued_loose = true;
@@ -2846,6 +2915,181 @@ fn importDropped(model: *Model, fx: *Effects) void {
     }
     if (queued_loose) persistLibrary(model, fx);
     pumpImport(model, fx);
+}
+
+// ------------------------------------------------------------- auto-skip
+
+/// A track that cannot play moves on to the next one instead of ending
+/// playback. `skip_streak` counts consecutive failures; once it reaches
+/// the list's length (or the next pick is the same broken track) the
+/// transport gives up with the honest "couldn't play" notice in the bar.
+fn failCurrentTrack(model: *Model, fx: *Effects) void {
+    const failed = model.now orelse return;
+    fx.cancelTimer(fade_timer_key);
+    model.fade = .none;
+    model.skip_streak += 1;
+    var buf: [max_queue]u8 = undefined;
+    const list_len = @max(1, @min(shuffleCandidates(model, &buf).len, 64));
+    if (model.skip_streak <= list_len) {
+        if (model.userTrackById(failed)) |track| model.setSkippedTitle(track.title());
+        // Repeat-one would retry the same file forever: advance as if
+        // repeating the list.
+        const repeat = model.repeat;
+        if (repeat == .one) model.repeat = .all;
+        skipForward(model, fx, true);
+        model.repeat = repeat;
+        if (model.now != null and model.now.? != failed and model.playing) {
+            showNotice(model, fx, .skipped, notice_import_ms);
+            return;
+        }
+    }
+    model.skip_streak = 0;
+    // A retry above may have reloaded the same file; nothing should keep
+    // playing behind the "couldn't play" notice.
+    fx.stopAudio();
+    model.assets_missing = true;
+    model.now = null;
+    model.playing = false;
+    model.elapsed_ms = 0;
+    model.now_duration_ms = 0;
+    model.platform_duration_ms = 0;
+    syncNowPlaying(model);
+    persistSession(model, fx);
+}
+
+// ------------------------------------------------------------------ fade
+
+/// Pause and resume ramp the volume over `fade_steps` × `fade_step_ms`
+/// instead of cutting the waveform mid-cycle (an audible click). The
+/// transport flips `playing` at once; the player pauses when the ramp
+/// ends. Muted playback has nothing to ramp.
+pub const fade_timer_key: u64 = 46;
+const fade_step_ms: u64 = 25;
+pub const fade_steps: u8 = 6;
+pub const Fade = enum { none, out, in };
+
+fn fadeLevel(model: *const Model) f32 {
+    const fraction = @as(f32, @floatFromInt(model.fade_step)) / @as(f32, @floatFromInt(fade_steps));
+    return model.effectiveVolume() * switch (model.fade) {
+        .none => 1,
+        .out => 1 - fraction,
+        .in => fraction,
+    };
+}
+
+fn startFade(model: *Model, fx: *Effects, direction: Fade) void {
+    // Reversing mid-ramp starts from the level already reached.
+    const reached: u8 = if (model.fade != .none and model.fade != direction) fade_steps - model.fade_step else 0;
+    model.fade = direction;
+    model.fade_step = reached;
+    fx.setAudioVolume(fadeLevel(model));
+    fx.startTimer(.{
+        .key = fade_timer_key,
+        .interval_ms = fade_step_ms,
+        .mode = .repeating,
+        .on_fire = Effects.timerMsg(.fade_tick),
+    });
+}
+
+fn fadeTick(model: *Model, fx: *Effects) void {
+    if (model.fade == .none) return;
+    model.fade_step += 1;
+    if (model.fade_step < fade_steps) {
+        fx.setAudioVolume(fadeLevel(model));
+        return;
+    }
+    fx.cancelTimer(fade_timer_key);
+    const finished = model.fade;
+    model.fade = .none;
+    model.fade_step = 0;
+    if (finished == .out) {
+        fx.pauseAudio();
+        // Leave the player at the real level for whatever plays next.
+        fx.setAudioVolume(model.effectiveVolume());
+    } else {
+        fx.setAudioVolume(model.effectiveVolume());
+    }
+}
+
+fn stopFade(model: *Model, fx: *Effects) void {
+    if (model.fade == .none) return;
+    fx.cancelTimer(fade_timer_key);
+    model.fade = .none;
+    model.fade_step = 0;
+    fx.setAudioVolume(model.effectiveVolume());
+}
+
+// ------------------------------------------------------------- playlist
+
+pub const QueueMove = enum { up, down, top, bottom };
+
+fn moveQueued(model: *Model, id: u8, move: QueueMove) void {
+    const from = model.queueIndexOf(id) orelse return;
+    const last = model.queue_len - 1;
+    const to: usize = switch (move) {
+        .up => if (from == 0) return else from - 1,
+        .down => if (from == last) return else from + 1,
+        .top => 0,
+        .bottom => last,
+    };
+    if (to == from) return;
+    if (to < from) {
+        std.mem.copyBackwards(u8, model.queue[to + 1 .. from + 1], model.queue[to..from]);
+    } else {
+        std.mem.copyForwards(u8, model.queue[from..to], model.queue[from + 1 .. to + 1]);
+    }
+    model.queue[to] = id;
+}
+
+// --------------------------------------------------------- remembered view
+
+/// Write the session file synchronously — main.zig calls this on quit so
+/// the last page and scroll survive even when no async save was pending.
+pub fn saveSessionNow(model: *const Model) void {
+    const path = model.sessionPath();
+    if (path.len == 0 or !std.fs.path.isAbsolute(path)) return;
+    var buffer: [max_session_store_bytes]u8 = undefined;
+    const bytes = model.serializeSession(&buffer);
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch return;
+    defer file.close(io);
+    file.writeStreamingAll(io, bytes) catch {};
+}
+
+/// Read just the view keys (open album, scroll offsets) before the first
+/// frame, so launch paints the page the user left instead of flashing the
+/// grid first. The rest of the session still restores asynchronously.
+pub fn loadSessionViewSync(model: *Model) void {
+    const path = model.sessionPath();
+    if (path.len == 0 or !std.fs.path.isAbsolute(path)) return;
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return;
+    defer file.close(io);
+    var buffer: [max_session_store_bytes]u8 = undefined;
+    var read_buffer: [1024]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    const len = reader.interface.readSliceShort(&buffer) catch return;
+    model.applySessionView(buffer[0..len]);
+}
+
+fn isImagePath(path: []const u8) bool {
+    const ext = std.fs.path.extension(path);
+    if (ext.len < 2) return false;
+    const body = ext[1..];
+    return std.ascii.eqlIgnoreCase(body, "png") or std.ascii.eqlIgnoreCase(body, "jpg") or
+        std.ascii.eqlIgnoreCase(body, "jpeg") or std.ascii.eqlIgnoreCase(body, "webp") or
+        std.ascii.eqlIgnoreCase(body, "gif");
+}
+
+/// An image dropped on an album page becomes that album's cover.
+fn setCoverFromDrop(model: *Model, fx: *Effects, album_id: u8, path: []const u8) void {
+    if (!importCoverFromSource(model, album_id, path)) return;
+    persistLibrary(model, fx);
+    _ = loadCoverFromPath(model, fx, album_id);
 }
 
 // ------------------------------------------------------------ cover thumbs
@@ -3122,8 +3366,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.detail_scroll = 0;
             // Detail cover should not wait on the staggered hydrate walk.
             requestCoverLoad(model, fx, id);
+            persistSession(model, fx);
         },
-        .close_album => model.open_album = null,
+        .close_album => {
+            if (model.open_album == null) return;
+            model.open_album = null;
+            persistSession(model, fx);
+        },
         .play_album => |id| {
             const first = model.firstTrackIdInAlbum(id) orelse return;
             // Replace the playlist with the whole album so repeat and
@@ -3264,6 +3513,23 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             clearNotice(model, fx);
         },
         .reveal_now_playing => revealNowPlaying(model),
+        .shuffle_album => |id| {
+            if (!model.shuffle) {
+                model.shuffle = true;
+                persistSession(model, fx);
+            }
+            update(model, .{ .play_album = id }, fx);
+        },
+        .fade_tick => |timer| {
+            if (timer.outcome != .fired) return;
+            fadeTick(model, fx);
+        },
+        .remove_selected => if (model.selected) |id| update(model, .{ .remove_track = id }, fx),
+        .queue_selected => if (model.selected) |id| update(model, .{ .queue_track = id }, fx),
+        .move_queued => |move| {
+            moveQueued(model, move.id, move.move);
+            persistSession(model, fx);
+        },
         .import_dropped => {
             closeHeaderMenus(model);
             importDropped(model, fx);
@@ -3383,19 +3649,9 @@ fn handleAudioEvent(model: *Model, fx: *Effects, event: native_sdk.EffectAudio) 
         // Kept as a no-op for journal / test feeds that still send them.
         .spectrum => {},
         .completed => onTrackCompleted(model, fx),
-        .failed, .rejected => {
-            // Playback could not run because the local file is unreadable
-            // or the host cannot decode it. Persist so a later launch
-            // does not keep auto-resuming a dead path.
-            model.assets_missing = true;
-            model.now = null;
-            model.playing = false;
-            model.elapsed_ms = 0;
-            model.now_duration_ms = 0;
-            model.platform_duration_ms = 0;
-            syncNowPlaying(model);
-            persistSession(model, fx);
-        },
+        // The file is unreadable or the host cannot decode it: move on
+        // to the next track (see `failCurrentTrack`).
+        .failed, .rejected => failCurrentTrack(model, fx),
     }
 }
 
@@ -3519,16 +3775,11 @@ fn pollAudioChannel(model: *Model, fx: *Effects) void {
     if (!snap.active) {
         // Player gone while we still hold this track — treat as failure
         // (decode miss, host without audio, stopped under us).
-        model.assets_missing = true;
-        model.now = null;
-        model.playing = false;
-        model.elapsed_ms = 0;
-        model.now_duration_ms = 0;
-        model.platform_duration_ms = 0;
-        syncNowPlaying(model);
-        persistSession(model, fx);
+        failCurrentTrack(model, fx);
         return;
     }
+    // Audio is really moving: the failure streak is over.
+    if (snap.playing and snap.position_ms > 0) model.skip_streak = 0;
 
     adoptPlatformDuration(model, fx, snap.duration_ms);
     const position: u32 = @intCast(@min(snap.position_ms, std.math.maxInt(u32)));
@@ -3591,8 +3842,10 @@ fn advanceRenderedClock(model: *Model, frame: FrameClock) void {
 
 fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     const track = model.resolveTrack(track_id) orelse return;
-    // The previous track's end poll would only land a wasted poll.
+    // The previous track's end poll would only land a wasted poll, and a
+    // pause ramp belongs to the old track.
     fx.cancelTimer(audio_end_timer_key);
+    stopFade(model, fx);
     model.now = track_id;
     // Starting a track selects it: the playing row is the current row
     // for the arrow keys and the inverted accent register alike.
@@ -3620,14 +3873,7 @@ fn startTrack(model: *Model, fx: *Effects, track_id: u8) void {
     // Fake-executor tests seed placeholder paths; skip the open check
     // there so playback logic stays unit-testable without real files.
     if (fx.executor != .fake and !localAudioReadable(track.path)) {
-        model.assets_missing = true;
-        model.now = null;
-        model.playing = false;
-        model.elapsed_ms = 0;
-        model.now_duration_ms = 0;
-        model.platform_duration_ms = 0;
-        syncNowPlaying(model);
-        persistSession(model, fx);
+        failCurrentTrack(model, fx);
         return;
     }
     // One player total: a new playAudio replaces whatever played before,
@@ -3669,10 +3915,16 @@ fn setPlaying(model: *Model, fx: *Effects, playing: bool) void {
         return;
     }
     model.playing = playing;
-    if (playing) {
+    if (model.effectiveVolume() == 0) {
+        stopFade(model, fx);
+        if (playing) fx.resumeAudio() else fx.pauseAudio();
+    } else if (playing) {
+        // Resume from silence (or from wherever a pause ramp got to).
+        if (model.fade == .none) fx.setAudioVolume(0);
         fx.resumeAudio();
+        startFade(model, fx, .in);
     } else {
-        fx.pauseAudio();
+        startFade(model, fx, .out);
     }
     syncNowPlaying(model);
     persistSession(model, fx);

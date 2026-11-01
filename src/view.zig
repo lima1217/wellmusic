@@ -224,6 +224,14 @@ fn queueRowKey(row: *const model_mod.TrackRow) canvas.UiKey {
 /// A pressable playlist row: a click plays that entry (or toggles pause
 /// on the loaded one), the × removes it.
 fn queueRow(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui.Node {
+    // No drag-to-reorder in this SDK's Zig views: the row menu moves it.
+    const menu = ui.arena.dupe(Ui.ContextMenuItem, &.{
+        .{ .label = model.str(.move_up), .msg = Msg{ .move_queued = .{ .id = row.id, .move = .up } } },
+        .{ .label = model.str(.move_down), .msg = Msg{ .move_queued = .{ .id = row.id, .move = .down } } },
+        .{ .label = model.str(.move_to_top), .msg = Msg{ .move_queued = .{ .id = row.id, .move = .top } } },
+        .{ .label = model.str(.move_to_bottom), .msg = Msg{ .move_queued = .{ .id = row.id, .move = .bottom } } },
+        .{ .label = model.str(.remove_from_playlist), .msg = Msg{ .remove_queued = row.id } },
+    }) catch &.{};
     return ui.el(.list_item, .{
         // 40pt: the desktop hit-area floor, clearing the × button.
         .height = 40,
@@ -231,6 +239,7 @@ fn queueRow(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui.Nod
         .gap = 10,
         .cross = .center,
         .on_press = Msg{ .play_track = row.id },
+        .context_menu = menu,
         .semantics = .{ .role = .listitem, .label = strings.playlistRowLabel(ui.arena, model.lang, row.title) },
     }, .{
         trackIndicator(ui, row),
@@ -489,6 +498,13 @@ fn detailHeading(ui: *Ui, model: *const Model, album: model_mod.Album, track_cou
         ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, strings.trackSummary(ui.arena, model.lang, album.artist, track_count, model.albumDurationMs(album.id))),
         ui.row(.{ .gap = 8, .cross = .center }, .{
             playAlbumButton(ui, model, album.id),
+            ui.button(.{
+                .variant = .ghost,
+                .size = .default,
+                .icon = "shuffle",
+                .on_press = Msg{ .shuffle_album = album.id },
+                .semantics = .{ .label = model.str(.shuffle_album) },
+            }, ""),
             ui.spacer(1),
         }),
     });

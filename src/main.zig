@@ -211,10 +211,18 @@ fn statusItem(model: *const Model, scratch: *WellMusicApp.StatusItemScratch) Wel
 ///   - ENTER plays the selected track (pause toggle when it is the
 ///     loaded one).
 ///   - Cmd+→ / Cmd+← skip tracks, Cmd+↑ / Cmd+↓ step the volume (the
-///     Music app's bindings), and Escape or Cmd+[ leave an album page.
+///     Music app's bindings), and Escape or Cmd+[ leave an album page;
+///   - Cmd+L shows the playing album, Cmd+Backspace removes the selected
+///     track (undoable), Cmd+Shift+N queues it to play next.
 pub fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     const mods = keyboard.modifiers;
+    if (mods.super and mods.shift and !mods.control and !mods.alt) {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "n")) return .queue_selected;
+        return null;
+    }
     if (mods.super and !mods.control and !mods.alt and !mods.shift) {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "backspace")) return .remove_selected;
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "l")) return .reveal_now_playing;
         if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return .{ .media_command = .next };
         if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return .{ .media_command = .previous };
         if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return .{ .volume_step = .up };
@@ -419,8 +427,14 @@ fn shimEvent(context: *anyopaque, runtime: *native_sdk.Runtime, event: native_sd
 fn shimStop(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
     const shim = HostShim.from(context);
     host_services = null;
-    // Quitting inside the Undo window makes the removal final.
-    model_mod.commitRemoval(&shim.ui.model);
+    // UiApp's stop joins the effect workers, so no async session write
+    // can land after (and over) the one below.
+    defer {
+        // Quitting inside the Undo window makes the removal final, and
+        // the page / scroll the user is on is saved for the next launch.
+        model_mod.commitRemoval(&shim.ui.model);
+        model_mod.saveSessionNow(&shim.ui.model);
+    }
     return shim.inner.stop_fn.?(shim.inner.context, runtime);
 }
 
@@ -500,6 +514,8 @@ pub fn main(init: std.process.Init) !void {
     // Restore before UiApp.init so the first painted frame already has
     // the catalog — avoids the empty-library flash of an async read.
     model_mod.loadLibrarySync(&model);
+    // Reopen the page the user left (needs the albums restored first).
+    model_mod.loadSessionViewSync(&model);
     // Fonts register on the installing frame only; decide from the
     // restored catalog so Latin-only libraries skip the CJK face RSS.
     prepareUiFontsIfNeeded(&model);
