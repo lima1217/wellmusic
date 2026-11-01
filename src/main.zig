@@ -459,6 +459,7 @@ fn shimStop(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
         // the page / scroll the user is on is saved for the next launch.
         model_mod.commitRemoval(&shim.ui.model);
         model_mod.saveSessionNow(&shim.ui.model);
+        model_mod.saveLibraryNow(&shim.ui.model);
     }
     return shim.inner.stop_fn.?(shim.inner.context, runtime);
 }

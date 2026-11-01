@@ -1881,3 +1881,91 @@ test "cover downscale averages a bounded sample grid per pixel" {
     model_mod.downscaleRgbaForTest(&src3, 3, 3, &one, 1, 1);
     try testing.expectEqual(@as(u8, 85), one[0]);
 }
+
+fn pendingWrites(fx: *model_mod.Effects, key: u64) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < fx.pendingFileCount()) : (i += 1) {
+        const request = fx.pendingFileAt(i) orelse continue;
+        if (request.key == key) count += 1;
+    }
+    return count;
+}
+
+test "a volume drag saves the session once it settles" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var model: Model = .{};
+    model.setSessionPath("/tmp/wellmusic-debounce/session.txt");
+    for ([_]f32{ 0.9, 0.8, 0.7, 0.6, 0.5 }) |level| {
+        applyFx(&model, .{ .volume_changed = level }, &fx);
+    }
+    try testing.expectEqual(@as(usize, 0), pendingWrites(&fx, model_mod.session_write_key));
+    try testing.expect(pendingTimer(&fx, model_mod.session_save_timer_key) != null);
+    applyFx(&model, .{ .session_save_due = .{ .key = model_mod.session_save_timer_key } }, &fx);
+    try testing.expectEqual(@as(usize, 1), pendingWrites(&fx, model_mod.session_write_key));
+}
+
+test "a background import writes the library in batches" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var model: Model = .{};
+    model.setMediaDir("/tmp/wellmusic-batch-media");
+    model.setStorePath("/tmp/wellmusic-batch-media/library.txt");
+    var path_buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        const path = try std.fmt.bufPrint(&path_buf, "/tmp/wellmusic-batch-src-{d}.mp3", .{i});
+        try testing.expect(model_mod.queueImport(&model, model_mod.imported_album_id, path));
+    }
+    model_mod.pumpImport(&model, &fx);
+    const revision_before = model.library_revision;
+    var landed: usize = 0;
+    while (landed < 7) : (landed += 1) {
+        try fx.feedExit(model_mod.import_spawn_key, 0);
+        drainFx(&model, &fx);
+    }
+    // Seven tracks in: the catalog moved, nothing written yet.
+    try testing.expectEqual(@as(usize, 7), model.user_track_count);
+    try testing.expect(model.library_revision != revision_before);
+    try testing.expectEqual(@as(usize, 0), pendingWrites(&fx, model_mod.library_write_key));
+    try fx.feedExit(model_mod.import_spawn_key, 0);
+    drainFx(&model, &fx);
+    try testing.expectEqual(@as(usize, 1), pendingWrites(&fx, model_mod.library_write_key));
+    try testing.expectEqual(@as(usize, 0), model.import_unsaved);
+    // The last two land and the drain flushes the rest (queued behind
+    // the in-flight write).
+    try fx.feedExit(model_mod.import_spawn_key, 0);
+    drainFx(&model, &fx);
+    try fx.feedExit(model_mod.import_spawn_key, 0);
+    drainFx(&model, &fx);
+    try testing.expectEqual(@as(usize, 10), model.user_track_count);
+    try testing.expectEqual(@as(usize, 0), model.import_unsaved);
+    try testing.expect(model.save_pending);
+}
+
+test "the quit flush writes the library atomically" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const dir = "/tmp/wellmusic-quit-flush";
+    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+    const path = "/tmp/wellmusic-quit-flush/library.txt";
+    defer std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+    var model: Model = .{};
+    model.setStorePath(path);
+    try testing.expect(model.addUserTrack("/tmp/demo/flush.mp3"));
+    model_mod.saveLibraryNow(&model); // nothing unsaved: no write
+    try testing.expect(!model_mod.localAudioReadable(path));
+    model.import_unsaved = 1;
+    model_mod.saveLibraryNow(&model);
+    try testing.expect(model_mod.localAudioReadable(path));
+    try testing.expect(!model_mod.localAudioReadable("/tmp/wellmusic-quit-flush/library.txt.tmp"));
+    var restored: Model = .{};
+    model_mod.loadLibrarySync(&restored); // no store path: stays empty
+    restored.setStorePath(path);
+    model_mod.loadLibrarySync(&restored);
+    try testing.expectEqual(@as(usize, 1), restored.user_track_count);
+}

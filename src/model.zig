@@ -496,6 +496,8 @@ pub const Msg = union(enum) {
     library_done: native_sdk.EffectFileResult,
     /// Persist / restore playback session (now, queue, mode, volume).
     session_done: native_sdk.EffectFileResult,
+    /// The debounced session save after a volume drag or held volume key.
+    session_save_due: native_sdk.EffectTimer,
     /// Decode a chosen cover image into the matching album cover slot.
     cover_done: native_sdk.EffectFileResult,
 
@@ -523,7 +525,7 @@ pub const Msg = union(enum) {
         "library_done",   "cover_done",     "volume_changed",
         "toggle_queue",   "remove_queued",  "clear_queue",
         "media_command",
-        "session_done",
+        "session_done",   "session_save_due",
         "toggle_add_menu", "close_add_menu",
     };
 };
@@ -691,6 +693,9 @@ pub const Model = struct {
     /// Progress for the "Importing n / total" line; reset when drained.
     import_total: usize = 0,
     import_done: usize = 0,
+    /// Tracks imported since the last library write (see
+    /// `import_save_every`).
+    import_unsaved: usize = 0,
     /// Outcome of the current import batch, reported when it drains.
     import_added: usize = 0,
     import_skipped: usize = 0,
@@ -757,7 +762,7 @@ pub const Model = struct {
         "library_revision", "title_heal_pending", "title_heal_index",
         "add_menu_open",
         "import_jobs",     "import_head",    "import_len",
-        "import_inflight_id", "import_total", "import_done",
+        "import_inflight_id", "import_total", "import_done", "import_unsaved",
         "import_added",    "import_skipped", "import_failed",
         "notice",          "notice_added",   "notice_skipped", "notice_failed",
         "notice_removed",  "undo_snapshot",  "undo_revision",  "defer_media_delete",
@@ -2042,6 +2047,23 @@ pub fn persistSession(model: *Model, fx: *Effects) void {
     model.session_write_inflight = true;
 }
 
+/// Volume drags and held volume keys change the session many times a
+/// second; serializing and writing it on each step bought nothing. Every
+/// call restarts this one-shot (same key replaces), so the save lands once
+/// the input settles. A quit inside the window is covered by
+/// `saveSessionNow`.
+pub const session_save_timer_key: u64 = 47;
+const session_save_settle_ms: u64 = 400;
+
+fn persistSessionSoon(fx: *Effects) void {
+    fx.startTimer(.{
+        .key = session_save_timer_key,
+        .interval_ms = session_save_settle_ms,
+        .mode = .one_shot,
+        .on_fire = Effects.timerMsg(.session_save_due),
+    });
+}
+
 fn requestSessionLoad(model: *Model, fx: *Effects) void {
     if (model.session_path_len == 0) return;
     fx.readFile(.{
@@ -2335,8 +2357,16 @@ fn finishImportCopy(model: *Model, fx: *Effects, exit: native_sdk.EffectExit) vo
         const copied = exit.reason == .exited and exit.code == 0;
         if (copied and model.insertUserTrack(id, job.album_id, dest, job.source())) {
             model.import_added += 1;
-            // Persist per track so a quit mid-import keeps what landed.
-            persistLibrary(model, fx);
+            // The catalog changed now (Undo / CJK-face checks read the
+            // revision), but the write is batched: re-serializing the
+            // whole library per copied file was ~350 KB of work each at
+            // capacity. A quit mid-batch is flushed by `saveLibraryNow`.
+            model.library_revision +%= 1;
+            model.import_unsaved += 1;
+            if (model.import_unsaved >= import_save_every) {
+                model.import_unsaved = 0;
+                writeLibrary(model, fx);
+            }
         } else {
             model.import_failed += 1;
             deleteManagedMediaFile(model, dest);
@@ -2345,7 +2375,15 @@ fn finishImportCopy(model: *Model, fx: *Effects, exit: native_sdk.EffectExit) vo
     pumpImport(model, fx);
 }
 
+/// Library writes during a background import: one per this many copied
+/// files, plus one when the queue drains.
+const import_save_every: usize = 8;
+
 fn finishImport(model: *Model, fx: *Effects) void {
+    if (model.import_unsaved > 0) {
+        model.import_unsaved = 0;
+        writeLibrary(model, fx);
+    }
     // Report the batch, including one where every file was a duplicate.
     if (model.import_added + model.import_skipped + model.import_failed > 0) {
         if (model.notice == .removed) commitRemoval(model);
@@ -3079,16 +3117,40 @@ fn moveQueued(model: *Model, id: u8, move: QueueMove) void {
 /// Write the session file synchronously — main.zig calls this on quit so
 /// the last page and scroll survive even when no async save was pending.
 pub fn saveSessionNow(model: *const Model) void {
-    const path = model.sessionPath();
-    if (path.len == 0 or !std.fs.path.isAbsolute(path)) return;
     var buffer: [max_session_store_bytes]u8 = undefined;
-    const bytes = model.serializeSession(&buffer);
+    writeFileAtomically(model.sessionPath(), model.serializeSession(&buffer));
+}
+
+/// Quit-time flush of catalog changes not yet on disk: an import batch
+/// below `import_save_every`, or a save queued behind a write that was
+/// still in flight (`save_pending`).
+pub fn saveLibraryNow(model: *Model) void {
+    if (model.import_unsaved == 0 and !model.save_pending) return;
+    const buffer = std.heap.page_allocator.alloc(u8, max_library_store_bytes) catch return;
+    defer std.heap.page_allocator.free(buffer);
+    writeFileAtomically(model.storePath(), model.serializeLibrary(buffer));
+    model.import_unsaved = 0;
+    model.save_pending = false;
+}
+
+/// Write `bytes` to a sibling temp file, then rename it over `path`: a
+/// quit (or crash) mid-write leaves the old file intact rather than a
+/// truncated one the next launch would read as a smaller library.
+fn writeFileAtomically(path: []const u8, bytes: []const u8) void {
+    if (path.len == 0 or !std.fs.path.isAbsolute(path)) return;
+    var tmp_buffer: [max_store_path + 8]u8 = undefined;
+    const tmp = std.fmt.bufPrint(&tmp_buffer, "{s}.tmp", .{path}) catch return;
     var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var file = std.Io.Dir.createFileAbsolute(io, path, .{}) catch return;
-    defer file.close(io);
-    file.writeStreamingAll(io, bytes) catch {};
+    {
+        var file = std.Io.Dir.createFileAbsolute(io, tmp, .{}) catch return;
+        defer file.close(io);
+        file.writeStreamingAll(io, bytes) catch return;
+    }
+    std.Io.Dir.renameAbsolute(tmp, path, io) catch {
+        std.Io.Dir.deleteFileAbsolute(io, tmp) catch {};
+    };
 }
 
 /// Read just the view keys (open album, scroll offsets) before the first
@@ -3486,7 +3548,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // Dragging the slider is an explicit level: it unmutes.
             model.muted = false;
             fx.setAudioVolume(model.effectiveVolume());
-            persistSession(model, fx);
+            // A drag reports every step; save once it settles.
+            persistSessionSoon(fx);
         },
         .toggle_mute => {
             // Muting at zero would leave nothing to restore; nudge up.
@@ -3504,6 +3567,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.volume = std.math.clamp(if (dir == .up) base + step else base - step, 0, 1);
             model.muted = false;
             fx.setAudioVolume(model.effectiveVolume());
+            // Held Cmd+Up / Cmd+Down repeats: save once it settles.
+            persistSessionSoon(fx);
+        },
+        .session_save_due => |timer| {
+            if (timer.outcome != .fired) return;
             persistSession(model, fx);
         },
         .toggle_queue => model.queue_open = !model.queue_open,
