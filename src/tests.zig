@@ -1802,3 +1802,14 @@ test "selection shortcuts remove, queue, and reveal" {
     apply(&model, .remove_selected);
     try testing.expectEqual(@as(usize, 1), model.user_track_count);
 }
+
+test "reduce motion zeroes every motion duration" {
+    for ([_]native_sdk.ColorScheme{ .light, .dark }) |scheme| {
+        for ([_]bool{ false, true }) |high_contrast| {
+            const motion = theme.tokens(scheme, high_contrast, true).motion;
+            try testing.expectEqual(@as(u32, 0), motion.fast_ms);
+            try testing.expectEqual(@as(u32, 0), motion.normal_ms);
+            try testing.expectEqual(@as(u32, 0), motion.slow_ms);
+        }
+    }
+}

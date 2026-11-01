@@ -81,16 +81,6 @@ const light_pressed = Color.rgb8(215, 215, 215);
 const light_text = Color.rgb8(22, 22, 22); // oklch(0.200 0 0)
 const light_text_muted = Color.rgb8(72, 72, 72); // oklch(0.400 0 0)
 
-/// Critically damped spring (damping ratio ≈ 1.0): settle without
-/// bounce. Mass 1 / stiffness 200 → critical damping ≈ 28.3. Used for
-/// track-change enters and any motion that inherits the theme spring —
-/// Apple's default UI spring (response ~0.35, no overshoot). Bounce is
-/// reserved for momentum-driven gestures (rubber-band scroll), not for
-/// chrome that merely appears.
-const ui_spring_mass: f32 = 1;
-const ui_spring_stiffness: f32 = 200;
-const ui_spring_damping: f32 = 28.3;
-
 /// The app's one brand statement, layered over whichever scheme/contrast
 /// register the pack resolves. Identity slots plus the fluid-feel pair:
 ///
@@ -128,8 +118,11 @@ const ui_spring_damping: f32 = 28.3;
 ///   the middle look "wrong" after a theme flip). Overlay `md` stays.
 /// - `scroll.overscroll`: rubber-band at content edges — continuous
 ///   resistance past the bound instead of a hard stop (Apple §9).
-/// - `motion`: spring easing + settle window ≈ Apple's 0.3–0.4s
-///   response; reduce-motion still zeroes durations through options.
+///
+/// No `motion` override: the pack's durations stand. An override here
+/// lands AFTER ThemeOptions zeroes motion for Reduce Motion, so it
+/// silently switched motion back on for exactly the users who asked
+/// for none (and nothing in this UI animates on these tokens anyway).
 fn accentOverridesFor(color_scheme: canvas.ColorScheme) canvas.DesignTokenOverrides {
     return .{
         .colors = .{
@@ -192,16 +185,6 @@ fn accentOverridesFor(color_scheme: canvas.ColorScheme) canvas.DesignTokenOverri
             },
         },
         .scroll = .{ .overscroll = .rubber_band },
-        .motion = .{
-            .normal_ms = 220,
-            .slow_ms = 340,
-            .easing = .spring,
-            .spring = .{
-                .mass = ui_spring_mass,
-                .stiffness = ui_spring_stiffness,
-                .damping = ui_spring_damping,
-            },
-        },
     };
 }
 
