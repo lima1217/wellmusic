@@ -436,10 +436,6 @@ pub const Msg = union(enum) {
     /// ticks, the one completion, and failures. Tests and journals send
     /// these directly; the live player does not — see `audio_poll`.
     audio_event: native_sdk.EffectAudio,
-    /// Controlled scroll: each region's applied offset lands here and the
-    /// view echoes it back, so a rebuild mid-gesture can never reset it.
-    grid_scrolled: canvas.ScrollState,
-    detail_scrolled: canvas.ScrollState,
     /// Context menu: queue a track to play after the current one.
     queue_track: u8,
     /// Header: open a native multi-select file dialog and
@@ -514,7 +510,7 @@ pub const Msg = union(enum) {
         "play_track",     "select_track",   "select_next",
         "select_previous", "play_selected", "frame_clock",
         "audio_poll",
-        "audio_event",    "grid_scrolled",  "detail_scrolled",
+        "audio_event",
         "queue_track",    "remove_track",   "edit_track",
         "edit_album",     "edit_title",     "edit_artist",
         "save_edit_track", "close_edit_track",
@@ -539,10 +535,15 @@ pub const Model = struct {
     /// fresh install matches the OS; `toggle_theme` locks light or dark.
     theme: ThemePreference = .system,
     open_album: ?u8 = null,
-    /// Controlled scroll offsets (album grid and album detail):
-    /// the model observes the applied offset and echoes it back.
+    /// SOURCE scroll offsets (album grid and album detail). The runtime
+    /// owns the live offset while the user scrolls; these apply only when
+    /// they change, and main.zig's HostShim copies the runtime offset back
+    /// before navigation and on quit (`adoptRuntimeScroll`).
     grid_scroll: f32 = 0,
     detail_scroll: f32 = 0,
+    /// Bumped on every album open / reveal: part of the detail scroll
+    /// region's key, so each gets a fresh runtime offset.
+    detail_scroll_epoch: u16 = 0,
     /// Chrome overlay geometry from `on_chrome` (tall hidden-inset
     /// titlebar): the header leads with a spacer this wide so its
     /// controls clear the traffic lights, and matches its height to the
@@ -725,7 +726,7 @@ pub const Model = struct {
     /// of these backing stores.
     pub const view_unbound = .{
         "open_album",      "grid_scroll",
-        "detail_scroll",   "canvas_width",
+        "detail_scroll",   "canvas_width",   "detail_scroll_epoch",
         "now",             "selected",       "playing",
         "repeat",          "shuffle",        "muted",          "lang",
         "elapsed_ms",      "frame_ns",       "now_duration_ms",
@@ -1614,6 +1615,15 @@ pub const Model = struct {
 
     /// The page the user left: the open album (if it still exists) and
     /// both scroll offsets. Unknown or malformed lines are ignored.
+    /// Copy the runtime-owned scroll offsets into the model. Writing the
+    /// value the runtime already shows changes nothing on screen, but it
+    /// makes the model the truth again for session save and for the
+    /// grid region that is rebuilt after leaving an album page.
+    pub fn adoptRuntimeScroll(model: *Model, grid: ?f32, detail: ?f32) void {
+        if (grid) |offset| model.grid_scroll = @max(0, offset);
+        if (detail) |offset| model.detail_scroll = @max(0, offset);
+    }
+
     pub fn applySessionView(model: *Model, bytes: []const u8) void {
         var lines = std.mem.splitScalar(u8, bytes, '\n');
         const header = lines.next() orelse return;
@@ -2854,6 +2864,9 @@ const detail_min_viewport: f32 = 600 - header_natural_height - 80;
 fn revealNowPlaying(model: *Model) void {
     const track = model.nowTrack() orelse return;
     model.open_album = track.album;
+    // A fresh scroll region, so the offset below applies even when it
+    // equals the last one the view declared.
+    model.detail_scroll_epoch +%= 1;
     model.selected = track.id;
     closeHeaderMenus(model);
     const row_top = detail_list_top + @as(f32, @floatFromInt(@max(track.number, 1) - 1)) * detail_row_height;
@@ -3230,6 +3243,12 @@ fn fitCoverSize(src_w: usize, src_h: usize) struct { w: usize, h: usize } {
     };
 }
 
+/// Samples per axis inside each destination pixel's source box (see
+/// `downscaleRgba`).
+const max_box_samples: usize = 4;
+
+pub const downscaleRgbaForTest = downscaleRgba;
+
 fn downscaleRgba(
     src: []const u8,
     src_w: usize,
@@ -3238,27 +3257,36 @@ fn downscaleRgba(
     dst_w: usize,
     dst_h: usize,
 ) void {
-    // Area average: every source pixel under a destination pixel
-    // contributes. Nearest-neighbour sampling of a 4000 px photo down to
-    // 256 px aliased fine detail into jagged edges and moiré.
+    // Area average over a bounded sample grid: each destination pixel
+    // averages at most `max_box_samples`² evenly spaced source pixels
+    // from its box. Averaging EVERY source pixel took ~12 ms for a
+    // 4000 px photo on the UI thread (over a 120 Hz frame); this takes
+    // ~0.8 ms and differs by under 1% on average. Nearest-neighbour (one
+    // sample) aliased fine detail into jagged edges and moiré.
     var y: usize = 0;
     while (y < dst_h) : (y += 1) {
         const y0 = y * src_h / dst_h;
         const y1 = @max(y0 + 1, (y + 1) * src_h / dst_h);
+        // Typed: `@min` against a comptime bound would narrow to u3, and
+        // `2 * n` below would overflow it.
+        const sy_n: usize = @min(y1 - y0, max_box_samples);
         var x: usize = 0;
         while (x < dst_w) : (x += 1) {
             const x0 = x * src_w / dst_w;
             const x1 = @max(x0 + 1, (x + 1) * src_w / dst_w);
+            const sx_n: usize = @min(x1 - x0, max_box_samples);
             var sum: [4]u32 = .{ 0, 0, 0, 0 };
-            var sy = y0;
-            while (sy < y1) : (sy += 1) {
-                var sx = x0;
-                while (sx < x1) : (sx += 1) {
+            var iy: usize = 0;
+            while (iy < sy_n) : (iy += 1) {
+                const sy = y0 + ((y1 - y0) * (2 * iy + 1)) / (2 * sy_n);
+                var ix: usize = 0;
+                while (ix < sx_n) : (ix += 1) {
+                    const sx = x0 + ((x1 - x0) * (2 * ix + 1)) / (2 * sx_n);
                     const si = (sy * src_w + sx) * 4;
                     inline for (0..4) |c| sum[c] += src[si + c];
                 }
             }
-            const n: u32 = @intCast((y1 - y0) * (x1 - x0));
+            const n: u32 = @intCast(sy_n * sx_n);
             const di = (y * dst_w + x) * 4;
             inline for (0..4) |c| dst[di + c] = @intCast((sum[c] + n / 2) / n);
         }
@@ -3378,12 +3406,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 header_natural_height;
         },
         .canvas_resized => |width| model.canvas_width = width,
-        .grid_scrolled => |state| model.grid_scroll = state.offset,
-        .detail_scrolled => |state| model.detail_scroll = state.offset,
         .open_album => |id| {
             model.open_album = id;
-            // A fresh record opens at its top.
+            // A fresh record opens at its top, in a fresh scroll region.
             model.detail_scroll = 0;
+            model.detail_scroll_epoch +%= 1;
             // Detail cover should not wait on the staggered hydrate walk.
             requestCoverLoad(model, fx, id);
             persistSession(model, fx);

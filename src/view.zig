@@ -306,13 +306,16 @@ fn contentView(ui: *Ui, model: *const Model) Ui.Node {
 
 fn albumGridView(ui: *Ui, model: *const Model) Ui.Node {
     const cells = model.visibleAlbums(ui.arena);
-    // Controlled scroll: the model stores the applied offset
-    // (`grid_scrolled`) and echoes it back, so a rebuild mid-gesture
-    // can never reset the region.
+    // The runtime owns the scroll offset while the user scrolls: no
+    // `on_scroll`, because every observation would be a Msg and every Msg
+    // a full rebuild — once per frame of a momentum scroll. `value` is the
+    // SOURCE offset, applied only when it changes (programmatic scroll,
+    // session restore); main.zig's HostShim copies the runtime offset back
+    // into the model before navigation and on quit. The semantics label is
+    // how HostShim finds this region.
     return ui.scroll(.{
         .grow = 1,
         .value = model.grid_scroll,
-        .on_scroll = Ui.scrollMsg(.grid_scrolled),
         .semantics = .{ .label = model.str(.album_grid) },
     }, ui.column(.{ .padding = content_padding, .gap = 20 }, .{
         if (cells.len == 0) emptyState(ui, model) else albumGrid(ui, model, gridFit(model.canvas_width), cells),
@@ -464,10 +467,14 @@ fn emptyState(ui: *Ui, model: *const Model) Ui.Node {
 fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
     const album = model.albumById(album_id) orelse return emptyState(ui, model);
     const rows = model.albumTrackRows(ui.arena, album_id);
+    // Runtime-owned offset, like the grid (see `albumGridView`). The key
+    // makes each album — and each "show the playing track" — a fresh
+    // region, so its source offset applies instead of inheriting where
+    // the previous album was scrolled to.
     return ui.scroll(.{
+        .key = canvas.uiKey((@as(u32, album_id) << 16) | model.detail_scroll_epoch),
         .grow = 1,
         .value = model.detail_scroll,
-        .on_scroll = Ui.scrollMsg(.detail_scrolled),
         .semantics = .{ .label = model.str(.album_detail) },
     }, ui.column(.{ .padding = content_padding, .gap = 20 }, .{
         ui.row(.{}, .{

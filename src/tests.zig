@@ -1856,3 +1856,28 @@ test "a Chinese UI needs the CJK face even over a Latin-only library" {
     model.lang = .zh;
     try testing.expect(model_mod.needsCjkFont(&model));
 }
+
+test "cover downscale averages a bounded sample grid per pixel" {
+    // 8x8 source: left half black, right half white, scaled to 2x2.
+    var src: [8 * 8 * 4]u8 = undefined;
+    for (0..8) |y| for (0..8) |x| {
+        const v: u8 = if (x < 4) 0 else 255;
+        const i = (y * 8 + x) * 4;
+        src[i] = v;
+        src[i + 1] = v;
+        src[i + 2] = v;
+        src[i + 3] = 255;
+    };
+    var dst: [2 * 2 * 4]u8 = undefined;
+    model_mod.downscaleRgbaForTest(&src, 8, 8, &dst, 2, 2);
+    try testing.expectEqual(@as(u8, 0), dst[0]);
+    try testing.expectEqual(@as(u8, 255), dst[4]);
+    try testing.expectEqual(@as(u8, 255), dst[3]);
+    // 3x3 source to 1x1: a 3-wide box keeps all 3 samples (mean of 0,0,255).
+    const row = [_]u8{ 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255 };
+    var src3: [3 * 3 * 4]u8 = undefined;
+    for (0..3) |r| @memcpy(src3[r * 12 ..][0..12], &row);
+    var one: [4]u8 = undefined;
+    model_mod.downscaleRgbaForTest(&src3, 3, 3, &one, 1, 1);
+    try testing.expectEqual(@as(u8, 85), one[0]);
+}

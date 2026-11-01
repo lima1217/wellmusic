@@ -373,6 +373,22 @@ const HostShim = struct {
         return @ptrCast(@alignCast(context));
     }
 
+    /// Copy the runtime-owned offsets of the album grid and album page
+    /// (found by their semantics labels) into the model.
+    fn syncScroll(shim: *HostShim, runtime: *native_sdk.Runtime) void {
+        const model = &shim.ui.model;
+        const layout = runtime.canvasWidgetLayout(shim.ui.canvas_window_id, canvas_label) catch return;
+        var grid: ?f32 = null;
+        var detail: ?f32 = null;
+        for (layout.nodes) |node| {
+            if (node.widget.kind != .scroll_view) continue;
+            const label = node.widget.semantics.label;
+            if (std.mem.eql(u8, label, model.str(.album_grid))) grid = node.widget.value;
+            if (std.mem.eql(u8, label, model.str(.album_detail))) detail = node.widget.value;
+        }
+        model.adoptRuntimeScroll(grid, detail);
+    }
+
     fn afterEvent(shim: *HostShim, runtime: *native_sdk.Runtime) !void {
         if (host_services == null) {
             if (shim.ui.effects.services) |services| {
@@ -413,6 +429,12 @@ fn shimStart(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
 
 fn shimEvent(context: *anyopaque, runtime: *native_sdk.Runtime, event: native_sdk.Event) anyerror!void {
     const shim = HostShim.from(context);
+    // Anything that can navigate or save reads the live scroll offsets
+    // first (the views no longer report every scroll frame as a Msg).
+    switch (event) {
+        .canvas_widget_pointer, .canvas_widget_keyboard, .command, .canvas_widget_context_menu => shim.syncScroll(runtime),
+        else => {},
+    }
     try shim.inner.event(runtime, event);
     // Window drops: the paths live only for this event, so stage a copy
     // and hand the import to the model as an ordinary command.
@@ -428,6 +450,8 @@ fn shimEvent(context: *anyopaque, runtime: *native_sdk.Runtime, event: native_sd
 fn shimStop(context: *anyopaque, runtime: *native_sdk.Runtime) anyerror!void {
     const shim = HostShim.from(context);
     host_services = null;
+    // Read the scroll offsets while the layout still exists.
+    shim.syncScroll(runtime);
     // UiApp's stop joins the effect workers, so no async session write
     // can land after (and over) the one below.
     defer {
