@@ -448,29 +448,75 @@ fn emptyState(ui: *Ui, model: *const Model) Ui.Node {
 
 // ----------------------------------------------------------- album detail
 
+/// Width of the album page's left column: the cover plus its padding.
+const detail_side_width: f32 = detail_cover_size + content_padding * 2;
+
+/// The album page, split in two. The left column is the album's identity
+/// (back, cover, title, artist) and stays put; the right column is the
+/// songs, under a fixed bar with Play, Shuffle and the count. The stacked
+/// layout spent the top ~300pt on the cover block, so the smallest window
+/// (1056×640) showed about four songs; split, it shows a full screen of
+/// them, the cover keeps its 200pt, and Play never scrolls away — however
+/// long the title (a six-line title used to push Play off the column).
+/// Chosen from three prototypes: docs/review/album-page-options.pdf.
 fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
     const album = model.albumById(album_id) orelse return emptyState(ui, model);
     const rows = model.albumTrackRows(ui.arena, album_id);
-    // Runtime-owned offset, like the grid (see `albumGridView`). The key
-    // makes each album — and each "show the playing track" — a fresh
-    // region, so its source offset applies instead of inheriting where
-    // the previous album was scrolled to.
-    return ui.scroll(.{
-        .key = canvas.uiKey((@as(u32, album_id) << 16) | model.detail_scroll_epoch),
-        .grow = 1,
-        .value = model.detail_scroll,
-        .semantics = .{ .label = model.str(.album_detail) },
-    }, ui.column(.{ .padding = content_padding, .gap = 20 }, .{
-        ui.row(.{}, .{
-            backButton(ui, model),
-            ui.spacer(1),
-        }),
-        ui.row(.{ .gap = 24 }, .{
+    return ui.row(.{ .grow = 1, .gap = 0 }, .{
+        // Its own scroll region: a title that wraps many lines on a short
+        // window must not clip.
+        ui.scroll(.{
+            .width = detail_side_width,
+            .semantics = .{ .label = model.str(.album_info) },
+        }, ui.column(.{ .padding = content_padding, .gap = 16 }, .{
+            ui.row(.{}, .{ backButton(ui, model), ui.spacer(1) }),
             detailCover(ui, model, album, detail_cover_size),
-            detailHeading(ui, model, album, rows.len),
+            ui.column(.{ .gap = 6 }, .{
+                AlbumTitleView.build(ui, model),
+                if (album.artist.len > 0) ui.text(.{}, album.artist) else ui.el(.stack, .{}, .{}),
+            }),
+        })),
+        ui.column(.{ .grow = 1, .gap = 0 }, .{
+            // Same top inset as the left column, so Play lines up with
+            // the back button's row.
+            ui.row(.{ .padding = content_padding, .gap = 8, .cross = .center }, .{
+                playAlbumButton(ui, model, album.id),
+                ui.button(.{
+                    .variant = .ghost,
+                    .size = .default,
+                    .icon = "shuffle",
+                    .on_press = Msg{ .shuffle_album = album.id },
+                    .semantics = .{ .label = model.str(.shuffle_album) },
+                }, ""),
+                ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, strings.trackSummary(
+                    ui.arena,
+                    model.lang,
+                    rows.len,
+                    model.albumDurationMs(album.id),
+                    model.albumDurationsKnown(album.id),
+                )),
+            }),
+            // Runtime-owned offset, like the grid (see `albumGridView`).
+            // The key makes each album — and each "show the playing
+            // track" — a fresh region, so its source offset applies.
+            ui.scroll(.{
+                .key = canvas.uiKey((@as(u32, album_id) << 16) | model.detail_scroll_epoch),
+                .grow = 1,
+                .value = model.detail_scroll,
+                .semantics = .{ .label = model.str(.album_detail) },
+            }, ui.column(.{ .gap = 0 }, .{
+                // Side insets only: the Play bar's own padding already
+                // spaces the first song from it (uniform `padding` would
+                // stack a second 24pt gap on top).
+                ui.row(.{ .gap = 0 }, .{
+                    ui.el(.stack, .{ .width = content_padding }, .{}),
+                    ui.column(.{ .grow = 1, .gap = 0 }, .{trackList(ui, model, rows)}),
+                    ui.el(.stack, .{ .width = content_padding }, .{}),
+                }),
+                ui.el(.stack, .{ .height = content_padding }, .{}),
+            })),
         }),
-        trackList(ui, model, rows),
-    }));
+    });
 }
 
 /// The album detail cover with its desktop context menu.
@@ -490,44 +536,6 @@ fn detailCover(ui: *Ui, model: *const Model, album: model_mod.Album, size: f32) 
         .context_menu = &desktop_menu,
         .semantics = .{ .label = strings.coverLabel(ui.arena, model.lang, album.title) },
     }, album.initials);
-}
-
-/// The album detail heading block: the markup title fragment, the artist,
-/// the song count and running time,
-/// and the play control. Edit info / change cover live on the cover's
-/// context menu, so the heading only mounts Play. The desktop shell
-/// grows it beside the cover and bottom-aligns (main .end).
-fn detailHeading(ui: *Ui, model: *const Model, album: model_mod.Album, track_count: usize) Ui.Node {
-    return ui.column(.{
-        .gap = 10,
-        .grow = 1,
-        .main = .end,
-    }, .{
-        // No "Album" eyebrow: a big title over a cover and a song list is
-        // already unmistakably an album page.
-        AlbumTitleView.build(ui, model),
-        ui.column(.{ .gap = 4 }, .{
-            if (album.artist.len > 0) ui.text(.{}, album.artist) else ui.el(.stack, .{}, .{}),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, strings.trackSummary(
-                ui.arena,
-                model.lang,
-                track_count,
-                model.albumDurationMs(album.id),
-                model.albumDurationsKnown(album.id),
-            )),
-        }),
-        ui.row(.{ .gap = 8, .cross = .center }, .{
-            playAlbumButton(ui, model, album.id),
-            ui.button(.{
-                .variant = .ghost,
-                .size = .default,
-                .icon = "shuffle",
-                .on_press = Msg{ .shuffle_album = album.id },
-                .semantics = .{ .label = model.str(.shuffle_album) },
-            }, ""),
-            ui.spacer(1),
-        }),
-    });
 }
 
 /// Icon+text buttons via `ElementOptions.icon`: the icon is part of the

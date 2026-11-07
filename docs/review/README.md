@@ -4,7 +4,7 @@ Branch `review/novice-copy-visual`. Everything here was measured on the app, not
 
 | file | what |
 |---|---|
-| [before-after.pdf](before-after.pdf) | 9 pages: same window, same data, before vs after, with what changed and why |
+| [before-after.pdf](before-after.pdf) | 10 pages: same window, same data, before vs after, with what changed and why |
 | [strings.csv](strings.csv) | every UI string, en + zh, length and display-width ratio, where used |
 | [glossary.md](glossary.md) | one term per concept, with the source for each choice |
 | [apple-terms.csv](apple-terms.csv) | Apple Music's own en / zh_CN strings for the same actions (primary source) |
@@ -32,7 +32,7 @@ Branch `review/novice-copy-visual`. Everything here was measured on the app, not
 | 1 | Edit dialog: placeholders repeated their labels ("Title" over a box saying "Song title"). | Fixed. |
 | 1 | "Album" eyebrow over an album title; "Playlist · 1". | Fixed. |
 | 1 | Grays were pure neutral (C = 0). | Fixed — warm (C ≈ 0.007, h 75°); a test rules out blue-leaning grays. |
-| 1 | At the minimum window (1056×640) the album page shows only ~4 songs under a 200pt cover. | **Not fixed.** A layout decision (smaller cover at short heights, or a compact header). Worth a 3-option comparison if it bothers you. |
+| 1 | At the minimum window (1056×640) the album page showed only ~4 songs under a 200pt cover. | Fixed — split layout (option C of three in [album-page-options.pdf](album-page-options.pdf)): identity in a fixed left column, Play/Shuffle/count fixed above the songs, only songs scroll. ~9 songs at the minimum window; Cmd+L reveal re-verified. |
 | 1 | Spacing values are scattered (gaps 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24). | **Not fixed.** Collapsing to a 4-pt scale touches every view; separate pass. |
 | 1 | Repeat defaults to "All" on first launch (Apple Music defaults to off). | **Not changed** — a product decision, not a defect. |
 | 1 | An image dropped while no album is open is ignored silently. | **Not fixed.** |

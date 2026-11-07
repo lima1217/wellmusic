@@ -3003,17 +3003,19 @@ fn removeAlbum(model: *Model, fx: *Effects, album_id: u8) void {
 
 // ------------------------------------------------------------ now playing
 
-/// Rough offset of the first track row in the album detail page (content
-/// padding + back row + gaps + the 200pt cover block) and the row height,
-/// so "show the playing album" can scroll its row into view.
-const detail_list_top: f32 = 304;
+/// Offset of the first song row inside the album page's song scroll (none:
+/// Play sits in a fixed bar above it, the cover and title in the separate
+/// left column) and
+/// the row height, so "show the playing album" can scroll its row into
+/// view.
+const detail_list_top: f32 = 0;
 const detail_row_height: f32 = 44;
 /// The smallest album-page viewport the window allows (600pt min height
 /// minus header and transport). The model does not track the canvas
 /// height, so scrolling is clamped against this floor: a short album
 /// never scrolls (the scroll view does not clamp a controlled offset),
 /// and a long one never scrolls past its last row.
-const detail_min_viewport: f32 = 600 - header_natural_height - 80;
+const detail_min_viewport: f32 = 600 - header_natural_height - 80 - 88;
 
 fn revealNowPlaying(model: *Model) void {
     const track = model.nowTrack() orelse return;

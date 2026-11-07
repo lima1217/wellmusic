@@ -13,7 +13,7 @@ Generated from `src/view.zig` and the `.native` markup: every literal size the U
 | screen | sizes in use |
 |---|---|
 | Album grid | body (title), sm (artist, header notice) — **2** |
-| Album page | 2.05× bold (album title), body (artist, rows), sm (count, row artist, number, duration) — **3** |
+| Album page | 1.6× bold (album title, sized for the 200pt side column), body (artist, rows), sm (count, row artist, number, duration) — **3** |
 | Empty library | body bold (heading), body (buttons), sm (hint) — **2** |
 | Queue panel | body bold (heading), body (titles), sm (count, artist) — **2** |
 | Edit dialog | body bold (heading), body (fields, buttons), sm (labels) — **2** |

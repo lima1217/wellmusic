@@ -818,7 +818,7 @@ test "album detail heading markup matches the hand-built paragraph" {
     const markup_node = view_mod.AlbumTitleView.build(&markup_ui, &model);
     var hand_ui = Ui.init(arena);
     const hand_node = hand_ui.paragraph(.{ .semantics = .{ .label = album.title } }, &.{
-        .{ .text = album.title, .weight = .bold, .scale = 2.05 },
+        .{ .text = album.title, .weight = .bold, .scale = 1.6 },
     });
 
     try testing.expectEqualStrings(hand_node.widget.text, markup_node.widget.text);
@@ -2087,4 +2087,21 @@ test "cmd+z undoes a removal and cmd+o adds songs" {
     try testing.expectEqual(Msg.undo_remove, z.?);
     const o = main.onKey(.{ .key = "o", .phase = .key_down, .modifiers = .{ .super = true } });
     try testing.expectEqual(Msg.add_music, o.?);
+}
+
+test "album page keeps its identity and Play outside the scrolling songs" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var model: Model = .{};
+    const album = try seedAlbum(&model, 3);
+    apply(&model, .{ .open_album = album });
+    const tree = try buildTree(arena_state.allocator(), &model);
+    const songs = findByLabel(tree.root, "Album") orelse return error.TestUnexpectedResult;
+    const info = findByLabel(tree.root, "Album info") orelse return error.TestUnexpectedResult;
+    // Songs scroll on their own; Play Album and the title live beside them.
+    try testing.expectEqual(@as(usize, 3), countListItems(songs));
+    try testing.expect(findByLabel(songs, "Play Album") == null);
+    try testing.expect(findByLabel(info, "Play Album") == null);
+    try testing.expect(findByLabel(tree.root, "Play Album") != null);
+    try testing.expect(findByLabel(info, "Back to Albums") != null);
 }

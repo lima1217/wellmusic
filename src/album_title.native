@@ -1,7 +1,7 @@
 <!-- The album detail page's heading: a markup SPAN PARAGRAPH whose one
-     bold run scales to 2.05x the body size — display-weight presence with
+     bold run scales to 1.6x the body size — sized for the album page's 200pt side column — display-weight presence with
      the size-specific hierarchy Apple uses for album titles (weight +
      scale as a set, not size alone). Compiled at comptime like the
      header and now-playing fragments; the label mirrors the visible
      title so assistive tech announces the heading by name. -->
-<text label="{openAlbumTitle}"><span weight="bold" scale="2.05">{openAlbumTitle}</span></text>
+<text label="{openAlbumTitle}"><span weight="bold" scale="1.6">{openAlbumTitle}</span></text>
