@@ -29,10 +29,10 @@ native package --target macos --binary zig-out/bin/wellmusic --signing adhoc --o
 
 ## Adding music
 
-- Header **⋯** menu → **Add Song** (mp3, m4a, wav, aac, flac, ogg; multiple files at once) or **Add Album** (pick a folder). The empty library also shows an Add button.
-- **Drag and drop**: drop audio files or folders onto the window. Loose files go to the **Library** album; each folder becomes an album named after the folder (a `cover.jpg` / `folder.jpg` / `front.png` … inside is picked up as the cover).
-- Tags in the files (title, artist, album, duration) are read on import. Imported audio and covers are **copied** into `~/Library/Application Support/wellmusic/media/`, so moving or deleting the originals never breaks playback.
-- Copies run in the background, one file at a time, with progress in the header. Each song appears as soon as its copy lands; the header then shows a summary such as "Added 10 songs · skipped 2 already in the library".
+- Header **+** (Add Music) → **Add Songs…** (mp3, m4a, wav, aac, flac, ogg; multiple files at once, or **Cmd+O**) or **Add Album from Folder…**. The empty library shows both as buttons.
+- **Drag and drop**: drop audio files or folders onto the window. Loose files go to the **Singles** album (单曲 in Chinese); each folder becomes an album named after the folder (a `cover.jpg` / `folder.jpg` / `front.png` … inside is picked up as the cover).
+- Tags in the files (title, artist, album, duration) are read on import, including GBK-encoded Chinese ID3 tags and Latin-1 names; MP3 and WAV lengths are read from the audio itself. A song whose length cannot be read shows none, and its album's total time is left out rather than shown short. Imported audio and covers are **copied** into `~/Library/Application Support/wellmusic/media/`, so moving or deleting the originals never breaks playback.
+- Copies run in the background, one file at a time, with progress in the header. Each song appears as soon as its copy lands; the header then shows a summary such as "Added 10 songs: 2 already in your library, 1 unsupported file". Anything left out is counted with its reason (duplicate, unsupported format, copy failure, the song or album limit, a folder with no songs).
 - Duplicates are detected by file content, not just path: the same song imported twice, or under another name, is skipped.
 - Capacity: **240 tracks** and **32 albums**.
 
@@ -40,7 +40,7 @@ native package --target macos --binary zig-out/bin/wellmusic --signing adhoc --o
 
 - Right-click a track → **Remove from Library**, or select it and press **Cmd+Backspace**.
 - Right-click an album tile or the album page cover → **Remove Album from Library** removes the album and all its tracks.
-- After a removal the header shows **Undo** for 6 seconds. The copied files are deleted only once the removal is final (the notice expires, you remove something else, or you quit).
+- After a removal the header shows **Undo** for 10 seconds (or press **Cmd+Z**). The copied files are deleted only once the removal is final (the notice expires, you remove something else, or you quit).
 
 ## Playback
 
@@ -53,11 +53,11 @@ native package --target macos --binary zig-out/bin/wellmusic --signing adhoc --o
 - A track that cannot be read or decoded is skipped, with a notice naming it; playback stops only if the whole list fails.
 - Pause and resume fade the volume over 150 ms instead of cutting the sound.
 
-## Playlist
+## Queue
 
 - Toggle it from the list icon at the right of the now-playing bar (or the menu bar ♪ item).
 - Click a row to play it; the × removes it. Right-click a row → **Move Up / Move Down / Move to Top / Move to Bottom**.
-- Right-click a track → **Play Next** (or **Cmd+Shift+N** on the selection) adds it to the playlist without starting it.
+- Right-click a track → **Play Next** (or **Cmd+Shift+N** on the selection) adds it to the queue without starting it.
 
 ## Control from outside the window
 
@@ -74,7 +74,9 @@ native package --target macos --binary zig-out/bin/wellmusic --signing adhoc --o
 | Cmd+→ / Cmd+← | Next / previous track |
 | Cmd+↑ / Cmd+↓ | Volume up / down |
 | Cmd+L | Show the playing album |
-| Cmd+Backspace | Remove the selected track (undoable) |
+| Cmd+Backspace | Remove the selected song (undoable) |
+| Cmd+Z | Undo the last removal |
+| Cmd+O | Add songs |
 | Cmd+Shift+N | Play the selected track next |
 | Esc or Cmd+[ | Back from an album page to the albums |
 | F7 / F8 / F9, media keys | Previous / play-pause / next |
@@ -97,7 +99,7 @@ Saves on quit go through a temporary file and a rename, so an interrupted write 
 
 ## Appearance
 
-- Light / dark follows the system; **⋯ → Dark mode / Light mode** locks one in and remembers it.
+- Light / dark follows the system; the moon / sun button in the header locks one in and remembers it.
 - System **Reduce Motion** is honored.
 - Chinese, Japanese, and Korean titles use a system font loaded on demand (when the UI is Chinese or the library contains CJK text).
 

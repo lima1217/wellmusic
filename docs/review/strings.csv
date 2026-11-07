@@ -1,0 +1,73 @@
+key,en,zh,en_chars,zh_chars,zh_display_width/en,used_in
+add_music,Add Music,添加音乐,9,4,0.89,view.zig model.zig main.zig header.native
+add_song,Add Songs…,添加歌曲…,10,5,0.90,view.zig model.zig header.native
+add_album,Add Album from Folder…,从文件夹添加专辑…,22,9,0.77,view.zig model.zig header.native
+dark_mode,Dark Mode,深色模式,9,4,0.89,model.zig
+light_mode,Light Mode,浅色模式,10,4,0.80,model.zig
+now_playing,Now Playing,正在播放,11,4,0.73,model.zig nowplaying.native
+nothing_playing,Not Playing,未在播放,11,4,0.73,model.zig
+pick_to_start,Double-click a song to play it,双击歌曲即可播放,30,8,0.53,model.zig
+cannot_play,Can’t play this song,无法播放这首歌,20,7,0.70,model.zig
+cannot_play_hint,The file may be damaged. Try adding it again.,文件可能已损坏，可以重新添加试试。,45,17,0.76,model.zig
+playback_controls,Playback controls,播放控制,17,4,0.47,model.zig nowplaying.native
+playback_options,Playback options,播放选项,16,4,0.50,model.zig nowplaying.native
+previous_track,Previous,上一首,8,3,0.75,model.zig nowplaying.native
+next_track,Next,下一首,4,3,1.50,model.zig nowplaying.native
+play_or_pause,Play or Pause,播放或暂停,13,5,0.77,model.zig nowplaying.native
+show_now_playing,Show the playing album,显示正在播放的专辑,22,9,0.82,model.zig nowplaying.native
+mode_shuffle_on,Shuffle On,随机播放已开启,10,7,1.40,model.zig
+mode_shuffle_off,Shuffle Off,随机播放已关闭,11,7,1.27,model.zig
+mode_repeat_off,Repeat Off,不循环,10,3,0.60,model.zig
+mode_repeat_all,Repeat All,列表循环,10,4,0.80,model.zig
+mode_repeat_one,Repeat One,单曲循环,10,4,0.80,model.zig
+volume,Volume,音量,6,2,0.67,model.zig nowplaying.native
+mute,Mute,静音,4,2,1.00,model.zig
+unmute,Unmute,取消静音,6,4,1.33,model.zig
+toggle_queue,Queue,播放列表,5,4,1.60,model.zig main.zig nowplaying.native
+library_empty,Your library is empty,资料库还是空的,21,7,0.67,view.zig
+library_empty_hint,You can also drag songs or folders into this window.,也可以把歌曲或文件夹直接拖进窗口。,52,17,0.65,view.zig
+loose_album_title,Singles,单曲,7,2,0.57,model.zig
+loose_album_artist,Various Artists,群星,15,2,0.27,model.zig
+album_grid,Albums,专辑,6,2,0.67,view.zig main.zig
+albums,Album list,专辑列表,10,4,0.80,view.zig
+album_detail,Album,专辑详情,5,4,1.60,view.zig main.zig
+album_tracks,Songs,歌曲,5,2,0.80,view.zig
+back_to_albums,Back to Albums,返回专辑列表,14,6,0.86,view.zig
+play_album,Play Album,播放专辑,10,4,0.80,view.zig model.zig
+open_album,Open Album,打开专辑,10,4,0.80,view.zig model.zig
+edit_info,Edit Info…,编辑信息…,10,5,0.90,view.zig
+change_cover,Change Cover…,更换封面…,13,5,0.69,view.zig model.zig
+remove_album,Remove Album from Library,从资料库移除专辑,25,8,0.64,view.zig model.zig
+play_next,Play Next,下一首播放,9,5,1.11,view.zig
+remove_from_library,Remove from Library,从资料库移除,19,6,0.63,view.zig
+playlist,Queue,播放列表,5,4,1.60,view.zig
+playlist_clear,Clear,清空,5,2,0.80,view.zig
+playlist_empty,The queue is empty,播放列表是空的,18,7,0.78,view.zig
+playlist_empty_hint,"Play an album, or right-click a song and choose Play Next.",播放一张专辑，或右键点击歌曲，选择“下一首播放”。,58,25,0.83,view.zig
+remove_from_playlist,Remove from Queue,从播放列表移除,17,7,0.82,view.zig
+move_up,Move Up,上移,7,2,0.57,view.zig
+move_down,Move Down,下移,9,2,0.44,view.zig
+move_to_top,Move to Top,移到最前,11,4,0.73,view.zig
+move_to_bottom,Move to Bottom,移到最后,14,4,0.57,view.zig
+shuffle_album,Shuffle Album,随机播放专辑,13,6,0.92,view.zig model.zig
+edit_song,Edit Song Info,编辑歌曲信息,14,6,0.86,view.zig
+edit_album,Edit Album Info,编辑专辑信息,15,6,0.80,view.zig model.zig
+title,Title,标题,5,2,0.80,view.zig model.zig main.zig
+artist,Artist,歌手,6,2,0.67,view.zig model.zig
+cancel,Cancel,取消,6,2,0.67,view.zig
+save,Save,保存,4,2,1.00,view.zig
+undo,Undo,撤销,4,2,1.00,view.zig
+dismiss,Dismiss,关闭,7,2,0.57,view.zig
+notice,Status,状态,6,2,0.67,view.zig model.zig
+dialog_add_music,Add Songs,添加歌曲,9,4,0.89,model.zig
+dialog_import_album,Choose a Folder to Add as an Album,选择要添加为专辑的文件夹,34,12,0.71,model.zig
+dialog_choose_cover,Choose a Cover Image,选择封面图片,20,6,0.60,model.zig
+dialog_audio,Audio,音频,5,2,0.80,model.zig
+dialog_images,Images,图片,6,2,0.67,model.zig
+dialog_all_files,All Files,所有文件,9,4,0.89,model.zig
+play,Play,播放,4,2,1.00,model.zig main.zig nowplaying.native
+pause,Pause,暂停,5,2,0.80,model.zig main.zig
+next,Next,下一首,4,3,1.50,model.zig main.zig nowplaying.native
+previous,Previous,上一首,8,3,0.75,model.zig main.zig nowplaying.native
+show_queue,Show Queue,显示播放列表,10,6,1.20,main.zig
+hide_queue,Hide Queue,隐藏播放列表,10,6,1.20,main.zig

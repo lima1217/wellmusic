@@ -1,0 +1,116 @@
+file,key,en,zh_CN
+Localizable.strings,v536u36j9m,%S song,%S首歌曲
+Localizable.strings,k2gwv8zywr,artwork,插图
+Localizable.strings,h5hq9qa6d0,Clear,清除
+Localizable.strings,qpbbvk2qw2,title,标题
+Localizable.strings,bsscmhjw3k,Would you like to delete these songs?,你要删除这些歌曲吗？
+Localizable.strings,pak9y4rbzx,Album,专辑
+Localizable.strings,zqwyfa4hcx,Albums,专辑
+Localizable.strings,2czsf8apqj,%S songs,%S首歌曲
+Localizable.strings,3bj09p6zcf,"%1$S album, %2$S songs",%1$S张专辑，%2$S首歌曲
+Localizable.strings,nqejz6h676,About an hour,约1小时
+Localizable.strings,y75vkq4pf7,Uploading remaining songs and artwork,正在上传剩下的歌曲和插图
+Localizable.strings,utbnzvk8hf,Artwork,插图
+Localizable.strings,vejphepsva,Artist,艺人
+Localizable.strings,znrx28f36f,%S minutes,%S分钟
+Localizable.strings,kphdttufny,Edit,编辑
+Localizable.strings,sn0ksz97vc,Not Playing,未在播放
+Localizable.strings,fc2w3hf57r,Name,名称
+Localizable.strings,t4hsesgu7n,Title,标题
+Localizable.strings,twpjzxwnx2,artist,艺人
+Localizable.strings,7n75rcfvuq,Album Artist,专辑艺人
+Localizable.strings,2z4k9yahgg,show songs to be played,显示即将播放的歌曲
+Localizable.strings,sw0xqz8030,Play Next,插播
+Localizable.strings,xbumh7q63w,This playlist is limited to %S songs.,此播放列表仅限%S首歌曲。
+Localizable.strings,f43v5f7m8d,%S hours,%S小时
+Localizable.strings,hve0jacj3m,mute,静音
+Localizable.strings,bu0b50fbmf,Would you like to delete this song?,你要删除此歌曲吗？
+Localizable.strings,6vf8kc7zuh,Add To Library,添加到资料库
+Localizable.strings,pzzzh5r9tj,Done,完成
+Localizable.strings,zcac8s2v62,album,专辑
+Localizable.strings,4m7dydbcf2,Pause,暂停
+Localizable.strings,mvvy6esvpz,Song,歌曲
+Localizable.strings,dpcku04bvd,playing next,待播清单
+Localizable.strings,jy9tuwmg0t,Add to Library,添加到资料库
+Localizable.strings,yw3be54583,%1$S of %2$S songs,%1$S首歌曲（共%2$S首）
+Localizable.strings,xa6gdubjj0,Cancel,取消
+Localizable.strings,pjvqqhfefe,hide playing next,隐藏待播清单
+Localizable.strings,kuda7ytvdz,1 of 1 song,1首歌曲（共1首）
+Localizable.strings,cdgswumxkd,Next,下一个
+Localizable.strings,u9emqkz38j,New songs could not be added.,未能添加新的歌曲。
+Localizable.strings,b74e67suce,Play,播放
+Localizable.strings,p6t7t0trsh,Mute,静音
+Localizable.strings,vsyuku7r6u,Songs,歌曲
+Localizable.strings,nk632dw6w6,%S hours remaining,还剩%S小时
+Localizable.strings,cn8z9m0jwz,Stream up to 1GB/hour.,流播放最高每小时1GB。
+Localizable.strings,tupcpxku7h,Shuffle,随机播放
+Localizable.strings,xu0k3j6yu3,Next,下一步
+Localizable.strings,gm36j0kvax,Import,导入
+Localizable.strings,mm7h5jasrf,%S hour,%S小时
+Localizable.strings,rdja62rm5u,edit,编辑
+Localizable.strings,hhq63aacva,albums,专辑
+Localizable.strings,yr0myf0378,Play a song to see the lyrics here.,播放歌曲并在此处查看歌词。
+Localizable.strings,8edw7fzhd3,hours,小时
+Localizable.strings,rb6474h7hu,Recently Added,最近添加
+Localizable.strings,t74pc73yb9,%S songs selected,已选定%S首歌曲
+Localizable.strings,5fnskv2hmg,Playing Next,待播清单
+Localizable.strings,2gx9gmwhkt,volume,音量
+Localizable.strings,esgh0zv4yz,This song contains explicit content.,此歌曲包含儿童不宜内容。
+Localizable.strings,0x0zd84t9c,Add to Library,添加到书库
+Localizable.strings,vcb3aqwqcs,Previous,上一个
+Localizable.strings,4jjc986c8t,remove,移除
+Localizable.strings,3ysfaq6v8j,next,下一个
+Localizable.strings,phh75amea8,Library,资料库
+Localizable.strings,3v8fzfsdqa,Remove,移除
+Localizable.strings,9vpqc56nfw,You haven’t played any songs.,你尚未播放任何歌曲。
+Localizable.strings,b42m3ta6n5,Clear songs,清除歌曲
+Localizable.strings,8usy3aaxq3,this may take up to an hour,这可能要花上一小时
+Localizable.strings,cskh5hrvde,No upcoming songs.,无待播歌曲。
+Localizable.strings,cddga7aesh,play,播放
+Localizable.strings,ed7heytax9,No song history for this station.,没有此电台的歌曲历史记录。
+Localizable.strings,eey646mku5,New songs could not be uploaded.,未能上传新的歌曲。
+Localizable.strings,778berdffm,repeat one,重复播放一首
+Localizable.strings,um7ejatu67,Delete from Library,从资料库删除
+Localizable.strings,jnka2axf3y,All of your songs are unchecked.,未勾选任何歌曲。
+Localizable.strings,3p8wgf776w,No songs,没有歌曲
+Localizable.strings,tzqg3ph6c9,About %S minutes,约%S分钟
+Localizable.strings,t2b3a9378a,%1$S song,%1$S首歌曲
+Localizable.strings,r25ucsj799,previous,上一个
+Localizable.strings,surmhu2exd,repeat all,全部重复播放
+Localizable.strings,j5zb20dhfj,album artist,专辑艺人
+Localizable.strings,yefc57eqdu,About %S hours,约%S小时
+Localizable.strings,ntmd8m200n,Remove from Library,从资料库移除
+Localizable.strings,yntqn04008,shuffle all,随机播放所有内容
+Localizable.strings,00fh2u3gac,Display song information,显示歌曲信息
+Localizable.strings,r0hcp533yn,%S minutes remaining,还剩%S分钟
+Localizable.strings,7uhqkn2jfa,songs,歌曲
+Localizable.strings,t0y7febecc,shuffle,随机播放
+Localizable.strings,2pzbpjz59m,minutes,分钟
+Localizable.strings,q9s35c3dby,"%1$S albums, %2$S songs",%1$S张专辑，%2$S首歌曲
+Localizable.strings,hfbt2utnyd,Save,保存
+Localizable.strings,nb27njyw2a,Also hide these songs,也隐藏这些歌曲
+Localizable.strings,h67trqsn9y,clear,清除
+Localizable.strings,95bk9fnrku,no songs,没有歌曲
+Localizable.strings,q752sv75m8,1 hour remaining,还剩1小时
+Localizable.strings,ea6fcawmb8,Unable to play song,无法播放歌曲
+Localizable.strings,jpw0zsgzjq,song id,歌曲id
+Localizable.strings,kpk55d7gwu,song,歌曲
+Localizable.strings,dsfzw7eg23,Song Info,歌曲信息
+Localizable.strings,548akkqvdc,LIBRARY,资料库
+Localizable.strings,4cvreby8yy,show playing next,显示待播清单
+Localizable.strings,rfh4hrpwrm,Also hide this song,也隐藏此歌曲
+Localizable.strings,9gtzpmq9fg,pause,暂停
+PlaylistGeneration.strings,UNABLE_TO_REFRESH_SONGS,Unable to refresh songs.,无法刷新歌曲。
+PlaylistGeneration.strings,PLAYLIST_INITIAL_PROGRESS_STRING_0,Finding song matches…,正在查找匹配歌曲…
+PlaylistGeneration.strings,PLAYLIST_INITIAL_PROGRESS_STRING_1,Matching songs…,正在匹配歌曲…
+PlaylistGeneration.strings,PLAYLIST_INITIAL_PROGRESS_STRING_2,Searching for songs…,正在搜索歌曲…
+PlaylistGeneration.strings,PLAYLIST_INITIAL_PROGRESS_STRING_3,Finding related songs…,正在查找相关歌曲…
+PlaylistGeneration.strings,UNABLE_TO_REORDER_SONGS,Unable to reorder songs.,无法重新排序歌曲。
+PlaylistGeneration.strings,UNABLE_TO_ADD_10_SONGS,Unable to add 10 songs.,无法添加10首歌。
+UserInterface.strings,MENU_HIDE_PLAY_QUEUE,Hide Playing Next,隐藏待播清单
+UserInterface.strings,SHOW_ALBUM_IN_LIBRARY_MENU_ITEM,Show Album in Library,在资料库中显示专辑
+UserInterface.strings,LYRICS_NO_SONG_MESSAGE,Play a song to see lyrics here.,播放歌曲并在此处查看歌词。
+UserInterface.strings,AX_RECENTLY_ADDED_CONTAINER,recently added,最近添加
+UserInterface.strings,PLAY_QUEUE_AUTOPLAY_SUBTITLE,Similar songs will play,将播放类似歌曲
+UserInterface.strings,GET_INFO_MENU_ITEM,Get Info,显示简介
+UserInterface.strings,MENU_SHOW_PLAY_QUEUE,Show Playing Next,显示待播清单
