@@ -84,23 +84,42 @@ pub fn probeFile(path: []const u8) ProbeBuffers {
     if (n == 0) return out;
     const bytes = header[0..n];
 
-    if (bytes.len >= 3 and std.mem.eql(u8, bytes[0..3], "ID3")) {
+    const file_size: u64 = (file.stat(io) catch return out).size;
+    const has_id3 = bytes.len >= 10 and std.mem.eql(u8, bytes[0..3], "ID3");
+    // Where the audio starts: after the ID3v2 tag (and its footer, v2.4).
+    const audio_start: u64 = if (has_id3)
+        10 + synchsafe(bytes[6..10]) + @as(u64, if (bytes[5] & 0x10 != 0) 10 else 0)
+    else
+        0;
+
+    var mp4 = false;
+    if (has_id3) {
         parseId3(bytes, &out);
     } else if (bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], "fLaC")) {
         parseFlac(bytes, &out);
     } else if (bytes.len >= 8 and std.mem.eql(u8, bytes[4..8], "ftyp")) {
+        mp4 = true;
         parseMp4(bytes, &out);
-        if (out.duration_ms == 0) {
-            var wider: [256 * 1024]u8 = undefined;
-            const wide_n = file.readPositionalAll(io, &wider, 0) catch 0;
-            if (wide_n > 0) walkMp4(wider[0..wide_n], 0, wide_n, &out, 0);
-        }
     } else if (bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], "OggS")) {
         parseOggVorbisComments(bytes, &out);
+    } else if (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and std.mem.eql(u8, bytes[8..12], "WAVE")) {
+        out.duration_ms = wavDurationMs(bytes);
     }
 
+    // Encoders that write the index last (ffmpeg's default) put `moov`
+    // after a large `mdat`: the header window holds neither the tags nor
+    // the duration. Walk the top-level atoms on disk to reach it.
+    if (mp4 and (out.duration_ms == 0 or out.title_len == 0)) walkMp4File(file, io, file_size, &out);
+
+    var has_id3v1 = false;
     if (out.title_len == 0 and out.artist_len == 0) {
-        parseId3v1(file, io, &out) catch {};
+        has_id3v1 = parseId3v1(file, io, &out) catch false;
+    }
+
+    // MP3 carries no length field of its own; read it off the first frame.
+    if (out.duration_ms == 0 and !mp4) {
+        const tail: u64 = if (has_id3v1) 128 else 0;
+        out.duration_ms = mp3DurationMs(file, io, audio_start, file_size -| tail);
     }
     return out;
 }
@@ -148,16 +167,20 @@ fn parseId3(bytes: []const u8, out: *ProbeBuffers) void {
     }
 }
 
-fn parseId3v1(file: std.Io.File, io: std.Io, out: *ProbeBuffers) !void {
+/// True when the file ends in an ID3v1 tag (whether or not it filled a field).
+fn parseId3v1(file: std.Io.File, io: std.Io, out: *ProbeBuffers) !bool {
     const info = try file.stat(io);
-    if (info.size < 128) return;
+    if (info.size < 128) return false;
     var tag: [128]u8 = undefined;
     const n = try file.readPositionalAll(io, &tag, info.size - 128);
-    if (n < 128) return;
-    if (!std.mem.eql(u8, tag[0..3], "TAG")) return;
-    if (out.title_len == 0) out.setTitle(trimId3v1(tag[3..33]));
-    if (out.artist_len == 0) out.setArtist(trimId3v1(tag[33..63]));
-    if (out.album_len == 0) out.setAlbum(trimId3v1(tag[63..93]));
+    if (n < 128) return false;
+    if (!std.mem.eql(u8, tag[0..3], "TAG")) return false;
+    // ID3v1 has no encoding byte: it is whatever the ripper's code page
+    // was — GBK on most Chinese rips, Latin-1 in the West.
+    if (out.title_len == 0) out.setTitle(decodeLegacy(trimId3v1(tag[3..33])));
+    if (out.artist_len == 0) out.setArtist(decodeLegacy(trimId3v1(tag[33..63])));
+    if (out.album_len == 0) out.setAlbum(decodeLegacy(trimId3v1(tag[63..93])));
+    return true;
 }
 
 fn trimId3v1(raw: []const u8) []const u8 {
@@ -269,17 +292,19 @@ fn walkMp4(bytes: []const u8, start: usize, end: usize, out: *ProbeBuffers, dept
         const body_start = offset + header;
         const body_end = offset + size;
         const body = bytes[body_start..body_end];
-        if (isContainer(typ)) {
-            const child = if (std.mem.eql(u8, typ, "meta") and body.len >= 4) body[4..] else body;
-            walkMp4(child, 0, child.len, out, depth + 1);
-        } else if (std.mem.eql(u8, typ, "mdhd")) {
-            parseMdhd(body, out);
-        } else if (std.mem.eql(u8, typ, "\xA9nam") or std.mem.eql(u8, typ, "name")) {
+        // Tag keys first: `isContainer` also matches them, and walking
+        // into one skips the `data` atom that holds the text.
+        if (std.mem.eql(u8, typ, "\xA9nam")) {
             if (decodeIlstData(body)) |text| out.setTitle(text);
         } else if (std.mem.eql(u8, typ, "\xA9ART")) {
             if (decodeIlstData(body)) |text| out.setArtist(text);
         } else if (std.mem.eql(u8, typ, "\xA9alb")) {
             if (decodeIlstData(body)) |text| out.setAlbum(text);
+        } else if (isContainer(typ)) {
+            const child = if (std.mem.eql(u8, typ, "meta") and body.len >= 4) body[4..] else body;
+            walkMp4(child, 0, child.len, out, depth + 1);
+        } else if (std.mem.eql(u8, typ, "mdhd")) {
+            parseMdhd(body, out);
         }
         offset += size;
     }
@@ -346,7 +371,8 @@ fn decodeTextFrame(data: []const u8) ?[]const u8 {
     const encoding = data[0];
     const payload = data[1..];
     return switch (encoding) {
-        0, 3 => trimUtf8(payload), // ISO-8859-1 / UTF-8
+        0 => decodeLegacy(payload), // "ISO-8859-1" — in practice also GBK
+        3 => trimUtf8(payload), // UTF-8
         1, 2 => trimUtf16(payload, encoding == 2), // UTF-16 with/without BOM
         else => trimUtf8(payload),
     };
@@ -380,13 +406,28 @@ fn trimUtf16(raw: []const u8, be_forced: bool) ?[]const u8 {
         }
     }
     var out_len: usize = 0;
-    while (offset + 1 < raw.len and out_len + 3 < scratch.buf.len) {
-        const code: u16 = if (big_endian)
-            (@as(u16, raw[offset]) << 8) | raw[offset + 1]
-        else
-            (@as(u16, raw[offset + 1]) << 8) | raw[offset];
+    while (offset + 1 < raw.len and out_len + 4 < scratch.buf.len) {
+        var code: u21 = readUnit(raw[offset .. offset + 2], big_endian);
         offset += 2;
         if (code == 0) break;
+        // Characters outside the BMP (emoji, rare CJK) arrive as a
+        // surrogate pair; encoding each half alone yields invalid UTF-8.
+        if (code >= 0xD800 and code <= 0xDBFF and offset + 1 < raw.len) {
+            const low = readUnit(raw[offset .. offset + 2], big_endian);
+            if (low >= 0xDC00 and low <= 0xDFFF) {
+                offset += 2;
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+            }
+        }
+        if (code >= 0xD800 and code <= 0xDFFF) code = 0xFFFD;
+        if (code >= 0x10000) {
+            scratch.buf[out_len] = @intCast(0xF0 | (code >> 18));
+            scratch.buf[out_len + 1] = @intCast(0x80 | ((code >> 12) & 0x3F));
+            scratch.buf[out_len + 2] = @intCast(0x80 | ((code >> 6) & 0x3F));
+            scratch.buf[out_len + 3] = @intCast(0x80 | (code & 0x3F));
+            out_len += 4;
+            continue;
+        }
         if (code < 0x80) {
             scratch.buf[out_len] = @intCast(code);
             out_len += 1;
@@ -402,6 +443,223 @@ fn trimUtf16(raw: []const u8, be_forced: bool) ?[]const u8 {
         }
     }
     return scratch.buf[0..out_len];
+}
+
+fn readUnit(bytes: []const u8, big_endian: bool) u21 {
+    return if (big_endian)
+        (@as(u21, bytes[0]) << 8) | bytes[1]
+    else
+        (@as(u21, bytes[1]) << 8) | bytes[0];
+}
+
+// ------------------------------------------------------- legacy encodings
+
+/// Text a tag labels ISO-8859-1 (ID3v2 encoding 0, all of ID3v1). Three
+/// things hide behind that label in real libraries, tried in order:
+///   1. UTF-8 (some taggers write it regardless of the flag),
+///   2. GBK — Chinese rippers wrote the system code page; every high
+///      byte then pairs as lead 0x81–0xFE + trail 0x40–0xFE,
+///   3. genuine Latin-1 ("Beyoncé").
+/// Copying the bytes through unchanged (the old behaviour) stored invalid
+/// UTF-8, which renders as garbage or tofu.
+fn decodeLegacy(raw: []const u8) []const u8 {
+    const text = trimUtf8(raw);
+    if (std.unicode.utf8ValidateSlice(text)) return text;
+    const scratch = struct {
+        threadlocal var buf: [256]u8 = undefined;
+    };
+    if (gbkPrefixLen(text)) |gbk_len| {
+        if (gb18030ToUtf8(text[0..gbk_len], &scratch.buf)) |decoded| return decoded;
+    }
+    return latin1ToUtf8(text, &scratch.buf);
+}
+
+/// The length of `text` that reads as GBK, or null when it does not.
+/// A fixed-width ID3v1 field can cut the last character in half, so one
+/// dangling lead byte at the very end is dropped rather than disqualifying.
+fn gbkPrefixLen(text: []const u8) ?usize {
+    var i: usize = 0;
+    var saw_pair = false;
+    while (i < text.len) {
+        const b = text[i];
+        if (b < 0x80) {
+            i += 1;
+            continue;
+        }
+        if (b < 0x81 or b == 0xFF) return null;
+        if (i + 1 == text.len) return if (saw_pair) i else null;
+        const trail = text[i + 1];
+        if (trail < 0x40 or trail == 0x7F or trail == 0xFF) return null;
+        saw_pair = true;
+        i += 2;
+    }
+    return if (saw_pair) text.len else null;
+}
+
+fn latin1ToUtf8(text: []const u8, buf: []u8) []const u8 {
+    var len: usize = 0;
+    for (text) |b| {
+        if (len + 2 > buf.len) break;
+        if (b < 0x80) {
+            buf[len] = b;
+            len += 1;
+        } else {
+            buf[len] = 0xC0 | (b >> 6);
+            buf[len + 1] = 0x80 | (b & 0x3F);
+            len += 2;
+        }
+    }
+    return buf[0..len];
+}
+
+/// GB18030 (a superset of GBK) → UTF-8 through CoreFoundation, loaded the
+/// same no-link way `locale.zig` reads the preferred languages. Null off
+/// macOS or when CoreFoundation rejects the bytes.
+fn gb18030ToUtf8(text: []const u8, buf: []u8) ?[]const u8 {
+    if (comptime @import("builtin").os.tag != .macos) return null;
+    const CFTypeRef = ?*anyopaque;
+    const encoding_gb18030: u32 = 0x0632; // kCFStringEncodingGB_18030_2000
+    const encoding_utf8: u32 = 0x08000100;
+    var lib = std.DynLib.open("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation") catch return null;
+    defer lib.close();
+    const create = lib.lookup(*const fn (CFTypeRef, [*]const u8, isize, u32, bool) callconv(.c) CFTypeRef, "CFStringCreateWithBytes") orelse return null;
+    const get_c = lib.lookup(*const fn (CFTypeRef, [*]u8, isize, u32) callconv(.c) bool, "CFStringGetCString") orelse return null;
+    const release = lib.lookup(*const fn (CFTypeRef) callconv(.c) void, "CFRelease") orelse return null;
+    const string = create(null, text.ptr, @intCast(text.len), encoding_gb18030, false) orelse return null;
+    defer release(string);
+    if (!get_c(string, buf.ptr, @intCast(buf.len), encoding_utf8)) return null;
+    return std.mem.sliceTo(buf, 0);
+}
+
+// -------------------------------------------------------------- durations
+
+/// MPEG audio (mp3) duration from the first frame after the ID3v2 tag:
+/// the Xing/Info or VBRI frame count when the encoder wrote one (every
+/// LAME/ffmpeg file does, VBR or not), else the constant-bitrate estimate
+/// from the audio byte length. 0 when no Layer III frame is found.
+fn mp3DurationMs(file: std.Io.File, io: std.Io, audio_start: u64, audio_end: u64) u32 {
+    if (audio_end <= audio_start) return 0;
+    var window: [4096]u8 = undefined;
+    const n = file.readPositionalAll(io, &window, audio_start) catch return 0;
+    return mp3DurationFromWindow(window[0..n], audio_end - audio_start);
+}
+
+fn mp3DurationFromWindow(bytes: []const u8, audio_len: u64) u32 {
+    var i: usize = 0;
+    while (i + 4 <= bytes.len) : (i += 1) {
+        if (bytes[i] != 0xFF or bytes[i + 1] & 0xE0 != 0xE0) continue;
+        const frame = MpegFrame.parse(bytes[i .. i + 4]) orelse continue;
+        // A lone 0xFFE sync is common in random data: trust it only when
+        // the next frame header follows where this frame says it ends.
+        const next = i + frame.length(bytes[i + 2]);
+        if (next + 4 > bytes.len or MpegFrame.parse(bytes[next .. next + 4]) == null or bytes[next] != 0xFF) continue;
+        // Xing/Info sits after the side information; VBRI at a fixed 32.
+        const side: usize = if (frame.mpeg1)
+            (if (frame.mono) 17 else 32)
+        else
+            (if (frame.mono) 9 else 17);
+        const xing = i + 4 + side;
+        if (xing + 12 <= bytes.len and (std.mem.eql(u8, bytes[xing .. xing + 4], "Xing") or std.mem.eql(u8, bytes[xing .. xing + 4], "Info"))) {
+            const flags = readU32(bytes[xing + 4 .. xing + 8]);
+            if (flags & 1 != 0) return frame.framesToMs(readU32(bytes[xing + 8 .. xing + 12]));
+        }
+        const vbri = i + 4 + 32;
+        if (vbri + 18 <= bytes.len and std.mem.eql(u8, bytes[vbri .. vbri + 4], "VBRI")) {
+            return frame.framesToMs(readU32(bytes[vbri + 14 .. vbri + 18]));
+        }
+        const audio_bytes = audio_len -| i;
+        return @intCast(@min(audio_bytes * 8 / frame.bitrate_kbps, std.math.maxInt(u32)));
+    }
+    return 0;
+}
+
+const MpegFrame = struct {
+    mpeg1: bool,
+    mono: bool,
+    sample_rate: u32,
+    bitrate_kbps: u32,
+
+    fn parse(h: []const u8) ?MpegFrame {
+        const version = (h[1] >> 3) & 0x3; // 0 = 2.5, 2 = 2, 3 = 1
+        const layer = (h[1] >> 1) & 0x3; // 1 = Layer III
+        if (version == 1 or layer != 1) return null;
+        const bitrate_index = h[2] >> 4;
+        const rate_index = (h[2] >> 2) & 0x3;
+        if (bitrate_index == 0 or bitrate_index == 15 or rate_index == 3) return null;
+        const mpeg1 = version == 3;
+        const v1_rates = [_]u32{ 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 };
+        const v2_rates = [_]u32{ 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 };
+        const base_rates = [_]u32{ 44100, 48000, 32000 };
+        const divisor: u32 = switch (version) {
+            3 => 1,
+            2 => 2,
+            else => 4,
+        };
+        return .{
+            .mpeg1 = mpeg1,
+            .mono = (h[3] >> 6) == 3,
+            .sample_rate = base_rates[rate_index] / divisor,
+            .bitrate_kbps = if (mpeg1) v1_rates[bitrate_index] else v2_rates[bitrate_index],
+        };
+    }
+
+    /// Bytes in this frame, header included (Layer III).
+    fn length(frame: MpegFrame, flags_byte: u8) usize {
+        const padding: usize = (flags_byte >> 1) & 1;
+        const coefficient: usize = if (frame.mpeg1) 144 else 72;
+        return coefficient * frame.bitrate_kbps * 1000 / frame.sample_rate + padding;
+    }
+
+    fn framesToMs(frame: MpegFrame, frames: usize) u32 {
+        const samples_per_frame: u64 = if (frame.mpeg1) 1152 else 576;
+        return @intCast(@min(@as(u64, frames) * samples_per_frame * 1000 / frame.sample_rate, std.math.maxInt(u32)));
+    }
+};
+
+/// PCM WAV: the `data` chunk length over the `fmt ` byte rate.
+fn wavDurationMs(bytes: []const u8) u32 {
+    var offset: usize = 12;
+    var byte_rate: u64 = 0;
+    while (offset + 8 <= bytes.len) {
+        const id = bytes[offset .. offset + 4];
+        const size: u64 = readU32Le(bytes[offset + 4 .. offset + 8]);
+        if (std.mem.eql(u8, id, "fmt ") and offset + 20 <= bytes.len) {
+            byte_rate = readU32Le(bytes[offset + 16 .. offset + 20]);
+        } else if (std.mem.eql(u8, id, "data")) {
+            if (byte_rate == 0) return 0;
+            return @intCast(@min(size * 1000 / byte_rate, std.math.maxInt(u32)));
+        }
+        offset += 8 + @as(usize, @intCast(size + (size & 1)));
+    }
+    return 0;
+}
+
+/// Top-level MP4 atoms read from disk until `moov`, which is then walked
+/// in memory. Capped at 8 MiB: a moov that large is an hours-long video.
+fn walkMp4File(file: std.Io.File, io: std.Io, file_size: u64, out: *ProbeBuffers) void {
+    var offset: u64 = 0;
+    while (offset + 8 <= file_size) {
+        var head: [16]u8 = undefined;
+        const n = file.readPositionalAll(io, &head, offset) catch return;
+        if (n < 8) return;
+        var size: u64 = readU32(head[0..4]);
+        if (size == 1) {
+            if (n < 16) return;
+            size = readU64(head[8..16]);
+        } else if (size == 0) {
+            size = file_size - offset;
+        }
+        if (size < 8) return;
+        if (std.mem.eql(u8, head[4..8], "moov")) {
+            if (size > 8 * 1024 * 1024) return;
+            const buf = std.heap.page_allocator.alloc(u8, @intCast(size)) catch return;
+            defer std.heap.page_allocator.free(buf);
+            const got = file.readPositionalAll(io, buf, offset) catch return;
+            walkMp4(buf[0..got], 0, got, out, 0);
+            return;
+        }
+        offset += size;
+    }
 }
 
 fn synchsafe(bytes: []const u8) usize {
@@ -553,4 +811,64 @@ test "id3v2 still reads title when declared tag exceeds probe window" {
 
     const probed = probeFile(path);
     try std.testing.expectEqualStrings(title, probed.title[0..probed.title_len]);
+}
+
+test "legacy tag text: UTF-8 passes, GBK and Latin-1 decode" {
+    try std.testing.expectEqualStrings("晴天", decodeLegacy("晴天"));
+    // "后来" in GBK, as a Chinese ripper's ID3v1 field holds it.
+    try std.testing.expectEqualStrings("后来", decodeLegacy("\xba\xf3\xc0\xb4"));
+    // A 30-byte ID3v1 field can cut the last GBK character in half.
+    try std.testing.expectEqualStrings("后来", decodeLegacy("\xba\xf3\xc0\xb4\xce"));
+    try std.testing.expectEqualStrings("Beyoncé", decodeLegacy("Beyonc\xe9"));
+    try std.testing.expectEqualStrings("Café Olé", decodeLegacy("Caf\xe9 Ol\xe9"));
+}
+
+test "utf-16 surrogate pairs become one 4-byte character" {
+    // "a🌙" little-endian with BOM: U+1F319 = D83C DF19.
+    const text = trimUtf16("\xff\xfea\x00\x3c\xd8\x19\xdf", false).?;
+    try std.testing.expectEqualStrings("a🌙", text);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+}
+
+test "mp3 duration: Xing frame count, else constant bitrate" {
+    // MPEG-1 Layer III, 128 kbps, 44.1 kHz, stereo.
+    var frame = [_]u8{0} ** 424;
+    // Two consecutive frame headers, 417 bytes apart (128 kbps, 44.1 kHz).
+    for ([_]usize{ 0, 417 }) |at| {
+        frame[at] = 0xFF;
+        frame[at + 1] = 0xFB;
+        frame[at + 2] = 0x90;
+        frame[at + 3] = 0x00;
+    }
+    @memcpy(frame[36..40], "Info");
+    frame[43] = 1; // flags: frame count present
+    // 1000 frames × 1152 samples / 44100 Hz = 26.122 s
+    frame[46] = 0x03;
+    frame[47] = 0xE8;
+    try std.testing.expectEqual(@as(u32, 26122), mp3DurationFromWindow(&frame, 1_000_000));
+    // No Xing header: 160 000 bytes at 128 kbps = 10 s.
+    @memset(frame[36..48], 0);
+    try std.testing.expectEqual(@as(u32, 10_000), mp3DurationFromWindow(&frame, 160_000));
+    try std.testing.expectEqual(@as(u32, 0), mp3DurationFromWindow("not audio", 9));
+    // A single stray sync with no frame after it is not audio.
+    @memset(frame[417..421], 0);
+    try std.testing.expectEqual(@as(u32, 0), mp3DurationFromWindow(&frame, 160_000));
+}
+
+test "wav duration from byte rate and data length" {
+    var wav = [_]u8{0} ** 44;
+    @memcpy(wav[0..4], "RIFF");
+    @memcpy(wav[8..12], "WAVE");
+    @memcpy(wav[12..16], "fmt ");
+    wav[16] = 16;
+    // byte rate 176400 (44.1 kHz, 16-bit stereo) = 0x0002B110
+    wav[28] = 0x10;
+    wav[29] = 0xB1;
+    wav[30] = 0x02;
+    @memcpy(wav[36..40], "data");
+    // 352800 bytes = 2 s → 0x00056220
+    wav[40] = 0x20;
+    wav[41] = 0x62;
+    wav[42] = 0x05;
+    try std.testing.expectEqual(@as(u32, 2000), wavDurationMs(&wav));
 }
