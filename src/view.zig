@@ -113,8 +113,11 @@ fn editDialog(ui: *Ui, model: *const Model, kind: EditKind) Ui.Node {
     const save: Msg = if (kind == .track) .save_edit_track else .save_edit_album;
     const close: Msg = if (kind == .track) .close_edit_track else .close_edit_album;
     const heading = model.str(if (kind == .track) .edit_song else .edit_album);
-    const title_hint = model.str(if (kind == .track) .song_title else .album_title);
-    const artist_label = model.str(if (kind == .track) .song_artist else .album_artist);
+    // Each field sits under its visible label, so the field's spoken name
+    // IS that label and there is no placeholder: a grey "Song title"
+    // inside a box already captioned "Title" says the same thing twice.
+    const title_label = model.str(.title);
+    const artist_label = model.str(.artist);
     return ui.el(.dialog, .{
         .width = 420,
         .padding = 20,
@@ -122,24 +125,22 @@ fn editDialog(ui: *Ui, model: *const Model, kind: EditKind) Ui.Node {
         .semantics = .{ .label = heading },
     }, .{
         ui.column(.{ .gap = 14 }, .{
-            ui.text(.{}, heading),
+            boldText(ui, heading),
             ui.column(.{ .gap = 6 }, .{
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.title)),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, title_label),
                 ui.textField(.{
                     .text = model.editTitle(),
-                    .placeholder = title_hint,
                     .on_input = Ui.inputMsg(.edit_title),
                     .on_submit = save,
                     .autofocus = true,
                     .grow = 1,
-                    .semantics = .{ .label = title_hint },
+                    .semantics = .{ .label = title_label },
                 }),
             }),
             ui.column(.{ .gap = 6 }, .{
-                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.artist)),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, artist_label),
                 ui.textField(.{
                     .text = model.editArtist(),
-                    .placeholder = model.str(.artist_name),
                     .on_input = Ui.inputMsg(.edit_artist),
                     .on_submit = save,
                     .grow = 1,
@@ -176,7 +177,7 @@ fn headerBand(ui: *Ui, model: *const Model) Ui.Node {
             .height = model.header_height,
             .gap = 8,
             .cross = .center,
-            .semantics = .{ .label = model.str(.import_progress) },
+            .semantics = .{ .label = model.str(.notice) },
         }, .{
             // `ElementOptions` has only uniform `padding` in this SDK, so
             // the side room is a fixed-width empty stack each way.
@@ -236,8 +237,9 @@ fn queuePanel(ui: *Ui, model: *const Model) Ui.Node {
         .semantics = .{ .label = model.str(.playlist) },
     }, .{
         // No top hairline: chrome-vs-page fill separates the band.
-        ui.row(.{ .padding = 12, .gap = 12, .cross = .center }, .{
-            ui.text(.{ .grow = 1 }, strings.playlistHeading(ui.arena, model.lang, rows.len)),
+        ui.row(.{ .padding = 12, .gap = 8, .cross = .center }, .{
+            boldText(ui, model.str(.playlist)),
+            ui.text(.{ .size = .sm, .grow = 1, .style_tokens = .{ .foreground = .text_muted } }, if (rows.len > 0) strings.songCount(ui.arena, model.lang, rows.len) else ""),
             if (rows.len > 0)
                 ui.button(.{ .variant = .ghost, .on_press = .clear_queue }, model.str(.playlist_clear))
             else
@@ -245,7 +247,7 @@ fn queuePanel(ui: *Ui, model: *const Model) Ui.Node {
         }),
         if (rows.len == 0)
             ui.column(.{ .padding = 12, .gap = 4 }, .{
-                ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, model.str(.playlist_empty)),
+                ui.text(.{}, model.str(.playlist_empty)),
                 ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.playlist_empty_hint)),
             })
         else
@@ -278,7 +280,7 @@ fn queueRow(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui.Nod
         .cross = .center,
         .on_press = Msg{ .play_track = row.id },
         .context_menu = menu,
-        .semantics = .{ .role = .listitem, .label = strings.playlistRowLabel(ui.arena, model.lang, row.title) },
+        .semantics = .{ .role = .listitem, .label = strings.songLabel(ui.arena, model.lang, row.title, row.artist) },
     }, .{
         trackIndicator(ui, row),
         ui.column(.{ .gap = 1, .grow = 1 }, .{
@@ -417,49 +419,27 @@ fn tileTitle(ui: *Ui, cell: *const model_mod.AlbumCell) Ui.Node {
     });
 }
 
-/// Shared Add control: one button, secondary menu for song vs album.
-/// Used by the empty state so the empty surface keeps a direct import
-/// entry point (the header overflow also offers Add Song / Add Album).
-fn addMenuControl(ui: *Ui, model: *const Model, size: canvas.WidgetSize, variant: canvas.WidgetVariant) Ui.Node {
-    return ui.el(.stack, .{}, .{
-        ui.button(.{
-            .size = size,
-            .variant = variant,
-            .icon = "plus",
-            .selected = model.add_menu_open,
-            .on_press = .toggle_add_menu,
-            .semantics = .{ .label = model.str(.add_to_library) },
-        }, ""),
-        if (model.add_menu_open)
-            ui.el(.dropdown_menu, .{
-                .anchor = .below,
-                .anchor_alignment = .start,
-                .anchor_offset = 4,
-                .on_dismiss = .close_add_menu,
-                .semantics = .{ .label = model.str(.add_menu) },
-            }, .{
-                ui.el(.menu_item, .{ .icon = "music", .on_press = .add_music, .text = model.str(.add_song) }, .{}),
-                ui.el(.menu_item, .{ .icon = "folder", .on_press = .import_album, .text = model.str(.add_album) }, .{}),
-            })
-        else
-            ui.el(.stack, .{}, .{}),
-    });
-}
-
+/// The empty library: a plain heading on the page and the two ways in,
+/// as labelled buttons — no card around it, no icon-only control. The
+/// old state was a card holding a full-width "+" that opened a menu: a
+/// first-time user saw a pink bar with no words on it. The one filled
+/// (accent) button is the common case, Add Songs; folders are the
+/// secondary path. The hint covers only what the buttons cannot show:
+/// drag-and-drop.
 fn emptyState(ui: *Ui, model: *const Model) Ui.Node {
-    // Surface-on-page elevation, no hard border: the theme zeroes
-    // panel sm shadows so full-bleed bands stay smear-free; the
-    // chrome step alone lifts this card off the gray/charcoal page.
-    return ui.panel(.{
+    return ui.column(.{
+        .gap = 12,
         .padding = 24,
-        .style = .{ .stroke_width = 0 },
-        .style_tokens = .{ .background = .surface, .radius = .lg },
         .semantics = .{ .label = model.str(.library_empty) },
-    }, ui.column(.{ .gap = 10 }, .{
-        ui.text(.{}, model.str(.library_empty)),
+    }, .{
+        boldText(ui, model.str(.library_empty)),
         ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.library_empty_hint)),
-        addMenuControl(ui, model, .default, .primary),
-    }));
+        ui.row(.{ .gap = 8, .cross = .center }, .{
+            ui.button(.{ .variant = .primary, .icon = "music", .on_press = .add_music }, model.str(.add_song)),
+            ui.button(.{ .variant = .secondary, .icon = "folder", .on_press = .import_album }, model.str(.add_album)),
+            ui.spacer(1),
+        }),
+    });
 }
 
 // ----------------------------------------------------------- album detail
@@ -508,8 +488,8 @@ fn detailCover(ui: *Ui, model: *const Model, album: model_mod.Album, size: f32) 
     }, album.initials);
 }
 
-/// The album detail heading block: the "Album" eyebrow, the markup title
-/// fragment, the artist/track-count line,
+/// The album detail heading block: the markup title fragment, the artist,
+/// the song count and running time,
 /// and the play control. Edit info / change cover live on the cover's
 /// context menu, so the heading only mounts Play. The desktop shell
 /// grows it beside the cover and bottom-aligns (main .end).
@@ -519,9 +499,19 @@ fn detailHeading(ui: *Ui, model: *const Model, album: model_mod.Album, track_cou
         .grow = 1,
         .main = .end,
     }, .{
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.album_eyebrow)),
+        // No "Album" eyebrow: a big title over a cover and a song list is
+        // already unmistakably an album page.
         AlbumTitleView.build(ui, model),
-        ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, strings.trackSummary(ui.arena, model.lang, album.artist, track_count, model.albumDurationMs(album.id))),
+        ui.column(.{ .gap = 4 }, .{
+            if (album.artist.len > 0) ui.text(.{}, album.artist) else ui.el(.stack, .{}, .{}),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, strings.trackSummary(
+                ui.arena,
+                model.lang,
+                track_count,
+                model.albumDurationMs(album.id),
+                model.albumDurationsKnown(album.id),
+            )),
+        }),
         ui.row(.{ .gap = 8, .cross = .center }, .{
             playAlbumButton(ui, model, album.id),
             ui.button(.{
@@ -611,12 +601,17 @@ fn trackRowView(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui
         .gap = 12,
         .cross = .center,
         .selected = row.selected,
-        .style_tokens = if (row.selected) .{ .background = .accent } else .{},
+        // Selection is a quiet neutral wash; the accent is kept for the
+        // one thing that is ON (the playing song's title and glyph). A
+        // selected row used to fill with the accent edge to edge — the
+        // largest block of colour in the window, for a state that only
+        // means "the last row you clicked".
+        .style_tokens = if (row.selected) .{ .background = .surface_pressed } else .{},
         .on_press = Msg{ .select_track = row.id },
         .on_double_press = Msg{ .play_track = row.id },
         .on_submit = Msg{ .play_track = row.id },
         .context_menu = desktop_menu,
-        .semantics = .{ .role = .listitem, .label = row.title },
+        .semantics = .{ .role = .listitem, .label = strings.songLabel(ui.arena, model.lang, row.title, row.artist) },
     }, .{
         trackIndicator(ui, row),
         if (row.subtitle.len == 0)
@@ -630,25 +625,17 @@ fn trackRowView(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui
     });
 }
 
-/// Row title ink: the accent's knockout ink (`accent_text`) on the
-/// selected (accent) row — the inverted register. The window-background
-/// token this used to take is only light-scheme white; in dark mode it
-/// resolves near-black and vanished into the accent fill, while
-/// `accent_text` is the ink the theme pairs with the accent in BOTH
-/// schemes (the filled Play Album button's white). Accent on the loaded
-/// track's row, default otherwise.
+/// Row title ink: accent on the loaded song's row, default otherwise.
+/// The selected row's neutral wash keeps both inks readable, so no
+/// knockout register is needed.
 fn rowTitleTokens(row: *const model_mod.TrackRow) canvas.StyleTokenRefs {
-    if (row.selected) return .{ .foreground = .accent_text };
     if (row.now) return .{ .foreground = .accent };
     return .{};
 }
 
-/// Row secondary ink (subtitle, duration, track number): muted at rest,
-/// the accent's knockout ink on the selected row — muted gray on the
-/// accent fill would fail the contrast the inverted register exists to
-/// keep, and only `accent_text` keeps that promise in both schemes.
+/// Row secondary ink (artist, duration, number): muted.
 fn rowMutedTokens(row: *const model_mod.TrackRow) canvas.StyleTokenRefs {
-    if (row.selected) return .{ .foreground = .accent_text };
+    _ = row;
     return .{ .foreground = .text_muted };
 }
 
@@ -670,9 +657,7 @@ fn trackIndicator(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
             .style_tokens = rowMutedTokens(row),
         }, row.number);
     }
-    const icon_tokens: canvas.StyleTokenRefs = if (row.selected)
-        .{ .foreground = .accent_text }
-    else if (row.playing)
+    const icon_tokens: canvas.StyleTokenRefs = if (row.playing)
         .{ .foreground = .accent }
     else
         .{ .foreground = .text_muted };
@@ -701,3 +686,9 @@ fn durationText(ui: *Ui, row: *const model_mod.TrackRow) Ui.Node {
 }
 
 // ---------------------------------------------------------------- shared
+
+/// A section heading at body size: weight, not a new font size, carries
+/// the hierarchy, so a page keeps to its small set of sizes.
+fn boldText(ui: *Ui, content: []const u8) Ui.Node {
+    return ui.paragraph(.{}, &.{.{ .text = content, .weight = .bold }});
+}

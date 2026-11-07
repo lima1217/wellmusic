@@ -118,7 +118,9 @@ pub const UserAlbum = struct {
     artist_storage: [max_user_title]u8 = undefined,
     artist_len: usize = 0,
     year: u16 = 2026,
-    initials_storage: [2]u8 = .{ 'A', 'A' },
+    /// Up to two letters, or one CJK character, as UTF-8.
+    initials_storage: [8]u8 = undefined,
+    initials_len: usize = 0,
     cover_path_storage: [max_user_path]u8 = undefined,
     cover_path_len: usize = 0,
     /// Non-zero when a cover image is registered (ImageId == album id).
@@ -133,7 +135,7 @@ pub const UserAlbum = struct {
     }
 
     pub fn initials(album: *const UserAlbum) []const u8 {
-        return album.initials_storage[0..2];
+        return album.initials_storage[0..album.initials_len];
     }
 
     pub fn coverPath(album: *const UserAlbum) []const u8 {
@@ -180,18 +182,33 @@ pub const UserAlbum = struct {
         album.cover = 0;
     }
 
+    /// The placeholder on a cover-less album: the title's first letter
+    /// plus the artist's ("AB" for "Abbey Road" by "Beatles"), or the
+    /// title's first character alone when it is not Latin — one 晴 reads
+    /// better than 晴 plus a stray letter. Whole UTF-8 sequences only: the
+    /// old byte-wise version cut CJK titles into invalid bytes (tofu).
     fn refreshInitials(album: *UserAlbum) void {
-        const t = album.title();
-        const a = album.artist();
-        album.initials_storage[0] = if (t.len > 0) std.ascii.toUpper(t[0]) else 'A';
-        album.initials_storage[1] = if (a.len > 0)
-            std.ascii.toUpper(a[0])
-        else if (t.len > 1)
-            std.ascii.toUpper(t[1])
-        else
-            'A';
+        album.initials_len = initialsInto(&album.initials_storage, album.title(), album.artist());
     }
 };
+
+fn initialsInto(out: *[8]u8, title_text: []const u8, artist_text: []const u8) usize {
+    const t = std.mem.trim(u8, title_text, " ");
+    const a = std.mem.trim(u8, artist_text, " ");
+    if (t.len == 0) return 0;
+    const first_len = std.unicode.utf8ByteSequenceLength(t[0]) catch return 0;
+    if (first_len > t.len) return 0;
+    if (first_len > 1) {
+        @memcpy(out[0..first_len], t[0..first_len]);
+        return first_len;
+    }
+    out[0] = std.ascii.toUpper(t[0]);
+    if (a.len > 0 and a[0] < 0x80 and std.ascii.isAlphanumeric(a[0])) {
+        out[1] = std.ascii.toUpper(a[0]);
+        return 2;
+    }
+    return 1;
+}
 
 pub const UserTrack = struct {
     id: u8 = 0,
@@ -700,11 +717,17 @@ pub const Model = struct {
     import_added: usize = 0,
     import_skipped: usize = 0,
     import_failed: usize = 0,
+    /// Dropped or picked files that are not audio WellMusic plays.
+    import_unsupported: usize = 0,
+    /// Songs turned away because the library was at `max_user_tracks`.
+    import_full: usize = 0,
     /// The notice line under the header (see `Notice`).
     notice: Notice = .none,
     notice_added: usize = 0,
     notice_skipped: usize = 0,
     notice_failed: usize = 0,
+    notice_unsupported: usize = 0,
+    notice_full: usize = 0,
     notice_removed: usize = 0,
     /// Serialized catalog from before the last removal (page_allocator);
     /// empty when there is nothing to undo.
@@ -764,7 +787,9 @@ pub const Model = struct {
         "import_jobs",     "import_head",    "import_len",
         "import_inflight_id", "import_total", "import_done", "import_unsaved",
         "import_added",    "import_skipped", "import_failed",
+        "import_unsupported", "import_full",
         "notice",          "notice_added",   "notice_skipped", "notice_failed",
+        "notice_unsupported", "notice_full",
         "notice_removed",  "undo_snapshot",  "undo_revision",  "defer_media_delete",
         "skip_streak",     "skipped_title_storage", "skipped_title_len", "skippedTitle",
         "fade",            "fade_step",
@@ -773,6 +798,7 @@ pub const Model = struct {
         "save_pending",
         "storePath",       "sessionPath",    "mediaDir",
         "editTitle",
+        "albumDurationsKnown", "localizeDefaultNames",
         "editArtist",      "isEditingTrack",
         "isEditingAlbum",  "queuedTracks",   "volumeFraction",
     };
@@ -803,8 +829,17 @@ pub const Model = struct {
 
     // Markup binds zero-argument fns, so each string the .native views
     // show gets a one-line accessor.
-    pub fn strMore(model: *const Model) []const u8 {
-        return model.str(.more);
+    pub fn strAddMusic(model: *const Model) []const u8 {
+        return model.str(.add_music);
+    }
+    pub fn strNowPlaying(model: *const Model) []const u8 {
+        return model.str(.now_playing);
+    }
+    pub fn strPlaybackControls(model: *const Model) []const u8 {
+        return model.str(.playback_controls);
+    }
+    pub fn strPlaybackOptions(model: *const Model) []const u8 {
+        return model.str(.playback_options);
     }
     pub fn strAddSong(model: *const Model) []const u8 {
         return model.str(.add_song);
@@ -925,6 +960,15 @@ pub const Model = struct {
         return total;
     }
 
+    /// True when every song in the album has a known length, so the sum
+    /// above is the album's real running time and not an undercount.
+    pub fn albumDurationsKnown(model: *const Model, album_id: u8) bool {
+        for (model.user_tracks[0..model.user_track_count]) |*track| {
+            if (track.album == album_id and track.duration_ms == 0) return false;
+        }
+        return true;
+    }
+
     pub fn tracksInAlbum(model: *const Model, album_id: u8) usize {
         var count: usize = 0;
         for (model.user_tracks[0..model.user_track_count]) |*track| {
@@ -982,7 +1026,15 @@ pub const Model = struct {
         if (progress.len > 0) return progress;
         return switch (model.notice) {
             .none => "",
-            .import_result => strings.importResult(arena, model.lang, model.notice_added, model.notice_skipped, model.notice_failed),
+            .import_result => strings.importResult(arena, model.lang, .{
+                .added = model.notice_added,
+                .duplicate = model.notice_skipped,
+                .failed = model.notice_failed,
+                .unsupported = model.notice_unsupported,
+                .full = model.notice_full,
+                .capacity = max_user_tracks,
+            }),
+            .albums_full => strings.albumsFull(arena, model.lang, max_user_albums),
             .removed => strings.removedTracks(arena, model.lang, model.notice_removed),
             .skipped => strings.skippedTrack(arena, model.lang, model.skippedTitle()),
         };
@@ -1071,8 +1123,8 @@ pub const Model = struct {
     }
 
     pub fn nowPlayingInitials(model: *const Model) []const u8 {
-        const track = model.nowTrack() orelse return "--";
-        const album = model.userAlbumById(track.album) orelse return "--";
+        const track = model.nowTrack() orelse return "";
+        const album = model.userAlbumById(track.album) orelse return "";
         return album.initials();
     }
 
@@ -1162,11 +1214,15 @@ pub const Model = struct {
             .id = track.id,
             .number = std.fmt.allocPrint(arena, "{d}", .{track.number}) catch "",
             .title = track.title,
+            .artist = artist,
             .subtitle = switch (style) {
-                .with_album => std.fmt.allocPrint(arena, "{s} — {s}", .{ artist, album_title }) catch "",
+                .with_album => if (artist.len == 0)
+                    album_title
+                else
+                    std.fmt.allocPrint(arena, "{s} — {s}", .{ artist, album_title }) catch "",
                 .number_only => if (track.artist.len > 0) track.artist else "",
             },
-            .duration = formatMs(arena, track.duration_ms),
+            .duration = strings.songLength(arena, track.duration_ms),
             .now = model.now == track.id,
             .playing = model.now == track.id and model.playing,
             .selected = model.selected == track.id,
@@ -1249,12 +1305,27 @@ pub const Model = struct {
         if (model.user_album_count >= max_user_albums) return false;
         var album: UserAlbum = .{};
         album.id = imported_album_id;
-        album.setTitle("Library");
-        album.setArtist("My Music");
+        album.setTitle(model.str(.loose_album_title));
+        album.setArtist(model.str(.loose_album_artist));
         album.year = 2026;
         model.user_albums[model.user_album_count] = album;
         model.user_album_count += 1;
         return true;
+    }
+
+    /// Libraries saved before the names were localized carry the English
+    /// placeholders: the loose-songs album was "Library" by "My Music",
+    /// and folder albums without a tag artist got "My Music" too. Swap in
+    /// the current language's names (persisted with the next save).
+    pub fn localizeDefaultNames(model: *Model) void {
+        for (model.user_albums[0..model.user_album_count]) |*album| {
+            if (album.id == imported_album_id and std.mem.eql(u8, album.title(), "Library")) {
+                album.setTitle(model.str(.loose_album_title));
+            }
+            if (std.mem.eql(u8, album.artist(), "My Music")) {
+                album.setArtist(if (album.id == imported_album_id) model.str(.loose_album_artist) else "");
+            }
+        }
     }
 
     /// Create a user album. Returns the new album id, or null when full.
@@ -1263,7 +1334,7 @@ pub const Model = struct {
         var album: UserAlbum = .{};
         album.id = model.freeAlbumId() orelse return null;
         album.setTitle(if (title.len > 0) title else "Album");
-        album.setArtist(if (artist.len > 0) artist else "My Music");
+        album.setArtist(artist);
         album.year = 2026;
         model.user_albums[model.user_album_count] = album;
         model.user_album_count += 1;
@@ -1372,9 +1443,9 @@ pub const Model = struct {
         if (album_id != imported_album_id and track.number == 1) {
             if (model.userAlbumByIdMut(album_id)) |album| {
                 if (meta.album_len > 0) album.setTitle(meta.album[0..meta.album_len]);
-                if (meta.artist_len > 0 and std.mem.eql(u8, album.artist(), "My Music")) {
-                    album.setArtist(meta.artist[0..meta.artist_len]);
-                }
+                // The tag knows the artist; the parent-folder guess only
+                // stands in when the files carry none.
+                if (meta.artist_len > 0) album.setArtist(meta.artist[0..meta.artist_len]);
             }
         }
         return true;
@@ -1677,6 +1748,7 @@ pub const Model = struct {
         if (skipped > 0) {
             for (model.user_albums[0..model.user_album_count]) |*album| model.renumberAlbumTracks(album.id);
         }
+        model.localizeDefaultNames();
         if (version < 3) {
             if (!model.ensureLibraryAlbum() and model.user_track_count > 0) return false;
             if (legacy_cover) |path| {
@@ -1836,6 +1908,8 @@ pub const TrackRow = struct {
     number: []const u8,
     title: []const u8,
     subtitle: []const u8,
+    /// The song's own artist, else its album's (for spoken labels).
+    artist: []const u8 = "",
     duration: []const u8,
     /// This track is loaded in the now-playing bar (playing or paused).
     now: bool,
@@ -1845,15 +1919,6 @@ pub const TrackRow = struct {
     /// User-imported tracks can be removed from the library.
     removable: bool,
 };
-
-fn formatMs(arena: std.mem.Allocator, ms: u32) []const u8 {
-    const total_seconds = ms / 1000;
-    const hours = total_seconds / 3600;
-    if (hours > 0) {
-        return std.fmt.allocPrint(arena, "{d}:{d:0>2}:{d:0>2}", .{ hours, (total_seconds / 60) % 60, total_seconds % 60 }) catch "";
-    }
-    return std.fmt.allocPrint(arena, "{d}:{d:0>2}", .{ total_seconds / 60, total_seconds % 60 }) catch "";
-}
 
 /// The library store is tab/newline delimited: a tag or edit carrying
 /// either would split its record on the next restore.
@@ -1907,15 +1972,25 @@ fn isCoverFileName(name: []const u8) bool {
     return false;
 }
 
+/// "Artist/Album/" is the common rip layout, so the parent folder is a
+/// fair first guess at the artist — unless it is a place, not a person.
+/// "" (no artist) beats a wrong one; the first song's tag overrides this.
 fn albumArtistFromDir(dir_path: []const u8) []const u8 {
-    const parent = std.fs.path.dirname(dir_path) orelse return "My Music";
+    const parent = std.fs.path.dirname(dir_path) orelse return "";
     const name = std.fs.path.basename(parent);
-    if (name.len == 0) return "My Music";
-    // Drive roots / volume names are not useful album artists.
-    if (std.mem.eql(u8, name, "/") or std.mem.eql(u8, name, "Volumes") or
-        std.mem.eql(u8, name, "Users") or std.mem.eql(u8, name, "Music") or
-        std.mem.eql(u8, name, "home"))
-        return "My Music";
+    const places = [_][]const u8{
+        "/",        "Volumes",   "Users",  "home",   "Music",   "iTunes",
+        "Media",    "Desktop",   "Downloads", "Documents", "Movies", "tmp",
+        "音乐",     "下载",      "桌面",   "文稿",   "Music Library",
+    };
+    if (name.len == 0) return "";
+    for (places) |place| {
+        if (std.ascii.eqlIgnoreCase(name, place)) return "";
+    }
+    // A user's home folder (/Users/<name>) is a person, but not the artist.
+    if (std.fs.path.dirname(parent)) |grand| {
+        if (std.mem.eql(u8, std.fs.path.basename(grand), "Users")) return "";
+    }
     return name;
 }
 
@@ -2279,7 +2354,7 @@ pub fn queueImport(model: *Model, album_id: u8, source: []const u8) bool {
     }
     const waiting = model.import_len - model.import_head;
     if (model.user_track_count + waiting >= max_user_tracks or model.import_len >= max_user_tracks) {
-        model.import_failed += 1;
+        model.import_full += 1;
         return false;
     }
     for (model.import_jobs[model.import_head..model.import_len]) |*job| {
@@ -2385,15 +2460,20 @@ fn finishImport(model: *Model, fx: *Effects) void {
         writeLibrary(model, fx);
     }
     // Report the batch, including one where every file was a duplicate.
-    if (model.import_added + model.import_skipped + model.import_failed > 0) {
+    const problems = model.import_skipped + model.import_failed + model.import_unsupported + model.import_full;
+    if (model.import_added + problems > 0) {
         if (model.notice == .removed) commitRemoval(model);
         model.notice_added = model.import_added;
         model.notice_skipped = model.import_skipped;
         model.notice_failed = model.import_failed;
+        model.notice_unsupported = model.import_unsupported;
+        model.notice_full = model.import_full;
         model.import_added = 0;
         model.import_skipped = 0;
         model.import_failed = 0;
-        showNotice(model, fx, .import_result, notice_import_ms);
+        model.import_unsupported = 0;
+        model.import_full = 0;
+        showNotice(model, fx, .import_result, if (problems > 0) notice_import_problem_ms else notice_import_ms);
     }
     if (model.import_total == 0) return;
     // An album whose every copy failed (or a Library album created for a
@@ -2433,6 +2513,10 @@ fn pickAndImportMusic(model: *Model, fx: *Effects) void {
     while (paths.next()) |path| {
         const trimmed = std.mem.trim(u8, path, " \r");
         if (trimmed.len == 0) continue;
+        if (!isAudioPath(trimmed)) {
+            model.import_unsupported += 1;
+            continue;
+        }
         if (queueImport(model, imported_album_id, trimmed)) added += 1;
     }
     if (added > 0) persistLibrary(model, fx);
@@ -2474,6 +2558,7 @@ fn importAlbumDir(model: *Model, fx: *Effects, dir_path: []const u8) void {
     var audio_count: usize = 0;
     var cover_path_buf: [max_user_path]u8 = undefined;
     var cover_path_len: usize = 0;
+    var other_count: usize = 0;
 
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
@@ -2487,8 +2572,16 @@ fn importAlbumDir(model: *Model, fx: *Effects, dir_path: []const u8) void {
         }
         const ext = std.fs.path.extension(entry.name);
         const ext_body = if (ext.len > 0 and ext[0] == '.') ext[1..] else ext;
-        if (!isAudioExtension(ext_body)) continue;
-        if (audio_count >= max_user_tracks) break;
+        if (!isAudioExtension(ext_body)) {
+            // Hidden files (.DS_Store) and images are not songs anyone
+            // expected to add; anything else is worth saying no to.
+            if (entry.name.len > 0 and entry.name[0] != '.' and !isImageExtension(ext_body)) other_count += 1;
+            continue;
+        }
+        if (audio_count >= max_user_tracks) {
+            model.import_full += 1;
+            continue;
+        }
         var joined_buf: [max_user_path]u8 = undefined;
         const joined = std.fmt.bufPrint(&joined_buf, "{s}{c}{s}", .{ dir_path, std.fs.path.sep, entry.name }) catch continue;
         @memcpy(audio_paths[audio_count][0..joined.len], joined);
@@ -2496,7 +2589,21 @@ fn importAlbumDir(model: *Model, fx: *Effects, dir_path: []const u8) void {
         audio_count += 1;
     }
 
-    if (audio_count == 0) return;
+    if (audio_count == 0) {
+        // A folder with no songs in it used to do nothing at all. Say so:
+        // "No songs added: 3 unsupported files" (or just "No songs added").
+        model.import_unsupported += other_count;
+        if (other_count == 0) {
+            showNotice(model, fx, .import_result, notice_import_problem_ms);
+            model.notice_added = 0;
+            model.notice_skipped = 0;
+            model.notice_failed = 0;
+            model.notice_unsupported = 0;
+            model.notice_full = 0;
+        }
+        pumpImport(model, fx);
+        return;
+    }
 
     // Sort by basename so track numbers follow filename order.
     var order: [max_user_tracks]usize = undefined;
@@ -2517,7 +2624,10 @@ fn importAlbumDir(model: *Model, fx: *Effects, dir_path: []const u8) void {
 
     const title = std.fs.path.basename(dir_path);
     const artist = albumArtistFromDir(dir_path);
-    const album_id = model.addUserAlbum(title, artist) orelse return;
+    const album_id = model.addUserAlbum(title, artist) orelse {
+        showNotice(model, fx, .albums_full, notice_import_problem_ms);
+        return;
+    };
 
     var added: u32 = 0;
     for (order[0..audio_count]) |idx| {
@@ -2754,10 +2864,15 @@ pub fn loadCoverFromPath(model: *Model, fx: *Effects, album_id: u8) bool {
 
 /// The one-line notice under the header: an import's result, or a
 /// removal with Undo. Clears itself after a few seconds.
-pub const Notice = enum { none, import_result, removed, skipped };
+pub const Notice = enum { none, import_result, removed, skipped, albums_full };
 pub const notice_timer_key: u64 = 45;
-const notice_import_ms: u64 = 4000;
-const notice_removed_ms: u64 = 6000;
+/// A clean add reads at a glance; one that left songs out carries reasons
+/// and needs time to read (WCAG 2.2.1: give people enough time). Undo gets
+/// ten seconds — long enough to notice a slip, short enough that the
+/// removal does not linger. Every notice can also be dismissed.
+const notice_import_ms: u64 = 5000;
+const notice_import_problem_ms: u64 = 12000;
+const notice_removed_ms: u64 = 10000;
 
 fn showNotice(model: *Model, fx: *Effects, kind: Notice, duration_ms: u64) void {
     // A notice replacing the removal's Undo makes that removal final.
@@ -2977,6 +3092,8 @@ fn importDropped(model: *Model, fx: *Effects) void {
             importAlbumDir(model, fx, path);
         } else if (isAudioPath(path)) {
             if (queueImport(model, imported_album_id, path)) queued_loose = true;
+        } else {
+            model.import_unsupported += 1;
         }
     }
     if (queued_loose) persistLibrary(model, fx);
@@ -3174,7 +3291,10 @@ pub fn loadSessionViewSync(model: *Model) void {
 fn isImagePath(path: []const u8) bool {
     const ext = std.fs.path.extension(path);
     if (ext.len < 2) return false;
-    const body = ext[1..];
+    return isImageExtension(ext[1..]);
+}
+
+fn isImageExtension(body: []const u8) bool {
     return std.ascii.eqlIgnoreCase(body, "png") or std.ascii.eqlIgnoreCase(body, "jpg") or
         std.ascii.eqlIgnoreCase(body, "jpeg") or std.ascii.eqlIgnoreCase(body, "webp") or
         std.ascii.eqlIgnoreCase(body, "gif");

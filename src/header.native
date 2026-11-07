@@ -1,37 +1,31 @@
-<!-- The wellmusic header bar: a trailing overflow (⋯) that holds
-     Add Song / Add Album and the theme toggle. Compiled
-     at comptime (canvas.CompiledMarkupView) and composed under the Zig
-     root view next to the Zig-only sections (album grid, track rows)
-     the closed markup grammar cannot express. Theme starts following
-     the system appearance; the moon/sun control locks light or dark
-     in-app (persisted with the session). Add Song / Add Album sit as
-     peer menu items — no nested Add submenu. Chrome fill is applied by the Zig shell
-     (`chromeBand`): layout row/column backgrounds do not paint, so the
-     band is a zero-radius panel over the page. -->
+<!-- The wellmusic header bar. Two trailing controls, both visible at all
+     times: Add Music (+), the app's main way in, and the light/dark
+     switch. Adding used to hide in a ⋯ overflow, where a first-time user
+     with a non-empty library had no visible way to add more; the
+     overflow held only three items, so it is gone. Compiled at comptime
+     (canvas.CompiledMarkupView) and composed under the Zig root view.
+     Chrome fill is applied by the Zig shell (`chromeBand`). -->
 <column>
-  <!-- The header IS the titlebar (tall hidden-inset chrome): it is the
-       window's drag surface, leads with a spacer sized to the traffic
-       lights via on_chrome, and matches its height to the titlebar band
-       so `cross="center"` puts icons on the band midline. -->
-  <row height="{header_height}" gap="12" cross="center" window-drag="true" label="WellMusic header">
+  <!-- The header IS the titlebar: the window's drag surface, leading
+       spacer sized to the traffic lights via on_chrome. -->
+  <row height="{header_height}" gap="4" cross="center" window-drag="true" label="WellMusic">
     <spacer width="{chrome_leading}" />
-    <!-- Band contents: bare drag surface, then the overflow at the
-         trailing corner. -->
     <spacer grow="1" />
     <stack>
-      <button size="sm" variant="ghost" icon="ellipsis" selected="{header_menu_open}" on-press="toggle_header_menu" label="{strMore}"></button>
+      <button size="sm" variant="ghost" icon="plus" selected="{header_menu_open}" on-press="toggle_header_menu" label="{strAddMusic}"></button>
       <if test="{header_menu_open}">
         <dropdown-menu anchor="below" anchor-alignment="end" anchor-offset="4" on-dismiss="close_header_menu">
           <menu-item icon="music" on-press="add_music">{strAddSong}</menu-item>
           <menu-item icon="folder" on-press="import_album">{strAddAlbum}</menu-item>
-          <menu-item icon="{themeIcon}" on-press="toggle_theme">{themeLabel}</menu-item>
         </dropdown-menu>
       </if>
+      <tooltip anchor="below">{strAddMusic}</tooltip>
     </stack>
-    <!-- The leading spacer's trailing twin: zero on macOS, sized to the
-         min/max/close cluster on Windows so controls clear the buttons. -->
+    <stack>
+      <button size="sm" variant="ghost" icon="{themeIcon}" on-press="toggle_theme" label="{themeLabel}"></button>
+      <tooltip anchor="below">{themeLabel}</tooltip>
+    </stack>
     <spacer width="{chrome_trailing}" />
+    <spacer width="8" />
   </row>
-  <!-- No hairline under the header: chrome-vs-page fill already
-       separates the band (shadows-over-borders). -->
 </column>

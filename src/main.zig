@@ -214,7 +214,8 @@ fn statusItem(model: *const Model, scratch: *WellMusicApp.StatusItemScratch) Wel
 ///   - Cmd+→ / Cmd+← skip tracks, Cmd+↑ / Cmd+↓ step the volume (the
 ///     Music app's bindings), and Escape or Cmd+[ leave an album page;
 ///   - Cmd+L shows the playing album, Cmd+Backspace removes the selected
-///     track (undoable), Cmd+Shift+N queues it to play next.
+///     track and Cmd+Z brings it back while Undo is offered, Cmd+O adds
+///     songs, Cmd+Shift+N queues the selection to play next.
 pub fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     const mods = keyboard.modifiers;
     if (mods.super and mods.shift and !mods.control and !mods.alt) {
@@ -223,6 +224,11 @@ pub fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     }
     if (mods.super and !mods.control and !mods.alt and !mods.shift) {
         if (std.ascii.eqlIgnoreCase(keyboard.key, "backspace")) return .remove_selected;
+        // Cmd+Z takes back a removal while its Undo is offered — the
+        // keyboard twin of the header button, so a slip is one chord away.
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "z")) return .undo_remove;
+        // Cmd+O: Apple Music's "Add to Library…" chord.
+        if (std.ascii.eqlIgnoreCase(keyboard.key, "o")) return .add_music;
         if (std.ascii.eqlIgnoreCase(keyboard.key, "l")) return .reveal_now_playing;
         if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return .{ .media_command = .next };
         if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return .{ .media_command = .previous };

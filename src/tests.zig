@@ -133,7 +133,7 @@ test "user library add remove and persist round-trip" {
     var buffer: [model_mod.max_library_store_bytes]u8 = undefined;
     const bytes = model.serializeLibrary(&buffer);
     try testing.expect(std.mem.startsWith(u8, bytes, model_mod.library_store_header));
-    try testing.expect(std.mem.indexOf(u8, bytes, "album\t1\tLibrary\tMy Music\t") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "album\t1\tSingles\tVarious Artists\t") != null);
     try testing.expect(std.mem.indexOf(u8, bytes, "/Covers/library.png") != null);
     try testing.expect(std.mem.indexOf(u8, bytes, "Alpha") != null);
 
@@ -282,8 +282,10 @@ test "empty library shows the add-music empty state" {
     defer arena_state.deinit();
     const tree = try buildTree(arena_state.allocator(), &Model{});
     try testing.expect(findByLabel(tree.root, "Your library is empty") != null);
-    try testing.expect(findByLabel(tree.root, "Add to library") != null);
-    try testing.expect(findByLabel(tree.root, "More") != null);
+    // Both ways in are labelled buttons on the page, not an icon-only "+".
+    try testing.expect(findByText(tree.root, .button, "Add Songs…") != null);
+    try testing.expect(findByText(tree.root, .button, "Add Album from Folder…") != null);
+    try testing.expect(findByLabel(tree.root, "Add Music") != null);
     try testing.expectEqual(@as(usize, 0), countListItems(tree.root));
 }
 
@@ -315,7 +317,7 @@ test "sync library load paints albums before first frame" {
 
     const tree = try buildTree(arena_state.allocator(), &model);
     try testing.expect(findByLabel(tree.root, "Your library is empty") == null);
-    try testing.expect(findByText(tree.root, .text, "Library") != null);
+    try testing.expect(findByText(tree.root, .text, "Singles") != null);
 }
 
 test "first frame hydrates library after album grid can paint" {
@@ -349,7 +351,7 @@ test "first frame hydrates library after album grid can paint" {
     try testing.expect(!model.title_heal_pending);
 }
 
-test "header overflow consolidates add and theme actions" {
+test "header shows add music and the theme switch directly" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     var model: Model = .{};
@@ -357,10 +359,11 @@ test "header overflow consolidates add and theme actions" {
     apply(&model, .toggle_header_menu);
     try testing.expect(model.header_menu_open);
     const open_tree = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findByLabel(open_tree.root, "More") != null);
-    try testing.expect(findByText(open_tree.root, .menu_item, "Add Song") != null);
-    try testing.expect(findByText(open_tree.root, .menu_item, "Add Album") != null);
-    try testing.expect(findByText(open_tree.root, .menu_item, "Dark mode") != null);
+    try testing.expect(findByLabel(open_tree.root, "Add Music") != null);
+    try testing.expect(findByText(open_tree.root, .menu_item, "Add Songs…") != null);
+    try testing.expect(findByText(open_tree.root, .menu_item, "Add Album from Folder…") != null);
+    // The theme switch is its own button, named for where it goes.
+    try testing.expect(findByLabel(open_tree.root, "Dark Mode") != null);
 
     apply(&model, .close_header_menu);
     try testing.expect(!model.header_menu_open);
@@ -374,17 +377,17 @@ test "imported tracks appear in albums and edit dialogs" {
     try testing.expect(model.addUserTrack("/tmp/demo/Track B.mp3"));
 
     const albums_tree = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findByText(albums_tree.root, .text, "Library") != null);
+    try testing.expect(findByText(albums_tree.root, .text, "Singles") != null);
 
     apply(&model, .{ .edit_track = model.user_tracks[0].id });
     const edit_tree = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findByLabel(edit_tree.root, "Edit Song") != null);
+    try testing.expect(findByLabel(edit_tree.root, "Edit Song Info") != null);
     try testing.expect(findByText(edit_tree.root, .button, "Save") != null);
 
     apply(&model, .close_edit_track);
     apply(&model, .{ .edit_album = model_mod.imported_album_id });
     const album_edit_tree = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findByLabel(album_edit_tree.root, "Edit Album") != null);
+    try testing.expect(findByLabel(album_edit_tree.root, "Edit Album Info") != null);
     try testing.expect(findByText(album_edit_tree.root, .button, "Save") != null);
 }
 
@@ -807,7 +810,7 @@ test "album detail heading markup matches the hand-built paragraph" {
     });
 
     try testing.expectEqualStrings(hand_node.widget.text, markup_node.widget.text);
-    try testing.expectEqualStrings("Library", markup_node.widget.text);
+    try testing.expectEqualStrings("Singles", markup_node.widget.text);
 }
 
 fn countWidgets(widget: canvas.Widget) usize {
@@ -996,9 +999,8 @@ test "queue panel appears when play-next is open" {
     try testing.expectEqual(@as(usize, 1), model.queue_len);
 
     const tree = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findByLabel(tree.root, "Playlist") != null);
     try testing.expect(findByText(tree.root, .button, "Clear") != null);
-    try testing.expect(findByLabel(tree.root, "Toggle play-next queue") != null);
+    try testing.expect(findByLabel(tree.root, "Queue") != null);
 }
 
 test "queue toggle is always on the now-playing bar" {
@@ -1010,13 +1012,13 @@ test "queue toggle is always on the now-playing bar" {
     try testing.expect(!model.queue_open);
 
     const closed = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findByLabel(closed.root, "Toggle play-next queue") != null);
-    try testing.expect(findByLabel(closed.root, "Playlist") == null);
+    try testing.expect(findByLabel(closed.root, "Queue") != null);
+    try testing.expect(findByText(closed.root, .text, "The queue is empty") == null);
 
     apply(&model, .toggle_queue);
     try testing.expect(model.queue_open);
     const open = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findByLabel(open.root, "Playlist") != null);
+    try testing.expect(findByText(open.root, .text, "The queue is empty") != null);
     try testing.expect(findByText(open.root, .button, "Clear") == null);
 }
 
@@ -1290,7 +1292,7 @@ test "background import copies through a spawn and reports progress" {
 
     // Nothing lands until the copy exits; the UI shows progress.
     try testing.expectEqual(@as(usize, 0), model.user_track_count);
-    try testing.expectEqualStrings("Importing 1 / 2…", model.importStatus(arena));
+    try testing.expectEqualStrings("Adding song 1 of 2…", model.importStatus(arena));
     const first = fx.pendingSpawnAt(0).?;
     try testing.expectEqualStrings("/bin/cp", first.argv[0]);
     try testing.expectEqualStrings(good, first.argv[3]);
@@ -1302,7 +1304,7 @@ test "background import copies through a spawn and reports progress" {
     drainFx(&model, &fx);
     try testing.expectEqual(@as(usize, 1), model.user_track_count);
     try testing.expectEqualStrings(dest, model.user_tracks[0].path());
-    try testing.expectEqualStrings("Importing 2 / 2…", model.importStatus(arena));
+    try testing.expectEqualStrings("Adding song 2 of 2…", model.importStatus(arena));
 
     // The second copy fails: no track, and the queue drains.
     try fx.feedExit(model_mod.import_spawn_key, 1);
@@ -1585,7 +1587,7 @@ test "an import reports what it added and skipped" {
     _ = model_mod.queueImport(&model, model_mod.imported_album_id, "/tmp/demo/r2.mp3");
     _ = model_mod.queueImport(&model, model_mod.imported_album_id, "/tmp/demo/r1.mp3");
     model_mod.pumpImport(&model, &fx);
-    try testing.expectEqualStrings("Added 2 songs · skipped 1 already in the library", try arenaText(&model));
+    try testing.expectEqualStrings("Added 2 songs: 1 already in your library", try arenaText(&model));
     applyFx(&model, .dismiss_notice, &fx);
     try testing.expectEqualStrings("", try arenaText(&model));
 }
@@ -1647,7 +1649,7 @@ test "the UI speaks Chinese when the system does" {
     const tree = try buildTree(arena_state.allocator(), &model);
     try testing.expect(findByLabel(tree.root, "资料库还是空的") != null);
     try testing.expectEqualStrings("未在播放", model.nowPlayingTitle());
-    try testing.expectEqualStrings("更多", model.strMore());
+    try testing.expectEqualStrings("添加音乐", model.strAddMusic());
 }
 
 test "revealing a track on a short album keeps the page at the top" {
@@ -1975,18 +1977,18 @@ test "icon-only transport controls carry tooltips naming their state" {
     defer arena_state.deinit();
     var model: Model = .{};
     var tree = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findTooltip(tree.root, "Shuffle: off"));
-    try testing.expect(findTooltip(tree.root, "Repeat: all"));
+    try testing.expect(findTooltip(tree.root, "Shuffle Off"));
+    try testing.expect(findTooltip(tree.root, "Repeat All"));
     try testing.expect(findTooltip(tree.root, "Mute"));
-    try testing.expect(findTooltip(tree.root, "Toggle play-next queue"));
+    try testing.expect(findTooltip(tree.root, "Queue"));
 
     apply(&model, .toggle_shuffle);
     apply(&model, .cycle_repeat);
     apply(&model, .toggle_mute);
     model.lang = .zh;
     tree = try buildTree(arena_state.allocator(), &model);
-    try testing.expect(findTooltip(tree.root, "随机播放：开"));
-    try testing.expect(findTooltip(tree.root, "循环：单曲"));
+    try testing.expect(findTooltip(tree.root, "随机播放已开启"));
+    try testing.expect(findTooltip(tree.root, "单曲循环"));
     try testing.expect(findTooltip(tree.root, "取消静音"));
 }
 
@@ -2004,4 +2006,73 @@ fn tooltipHasText(widget: canvas.Widget, text: []const u8) bool {
         if (tooltipHasText(child, text)) return true;
     }
     return false;
+}
+
+// ------------------------------------------------- review: novice blockers
+
+test "a drop with nothing playable says why instead of doing nothing" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    fx.executor = .fake;
+    var model: Model = .{};
+    try testing.expect(model_mod.stageDroppedPaths(&.{ "/tmp/demo/notes.txt", "/tmp/demo/song.wma" }));
+    applyFx(&model, .import_dropped, &fx);
+    try testing.expectEqual(@as(usize, 0), model.user_track_count);
+    try testing.expectEqualStrings("No songs added: 2 unsupported files", try arenaText(&model));
+}
+
+test "a full library names the limit rather than a copy failure" {
+    var fx = model_mod.Effects.init(testing.allocator);
+    fx.executor = .fake;
+    var model: Model = .{};
+    // The real app copies into its media folder; that path holds the check.
+    model.setMediaDir("/tmp/wellmusic-test-media");
+    var path_buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (model.user_track_count < model_mod.max_user_tracks) : (i += 1) {
+        const path = try std.fmt.bufPrint(&path_buf, "/tmp/demo/full-{d}.mp3", .{i});
+        _ = model.addUserTrack(path);
+    }
+    try testing.expect(!model_mod.queueImport(&model, model_mod.imported_album_id, "/tmp/demo/one-more.mp3"));
+    model_mod.pumpImport(&model, &fx);
+    try testing.expectEqualStrings("No songs added: 1 left out because the library is full (240 songs max)", try arenaText(&model));
+}
+
+test "album initials keep whole characters for CJK titles" {
+    var model: Model = .{};
+    const zh = model.addUserAlbum("叶惠美", "周杰伦").?;
+    try testing.expectEqualStrings("叶", model.userAlbumById(zh).?.initials());
+    const en = model.addUserAlbum("abbey road", "Beatles").?;
+    try testing.expectEqualStrings("AB", model.userAlbumById(en).?.initials());
+    const mixed = model.addUserAlbum("Fantasy", "周杰伦").?;
+    try testing.expectEqualStrings("F", model.userAlbumById(mixed).?.initials());
+    try testing.expect(std.unicode.utf8ValidateSlice(model.userAlbumById(zh).?.initials()));
+}
+
+test "old English placeholder names are localized on load" {
+    const bytes = "wellmusic-library v3\nalbum\t1\tLibrary\tMy Music\t2026\t\nalbum\t2\tLive\tMy Music\t2026\t\n";
+    var model: Model = .{};
+    model.lang = .zh;
+    try testing.expect(model.restoreLibrary(bytes));
+    try testing.expectEqualStrings("单曲", model.userAlbumById(1).?.title());
+    try testing.expectEqualStrings("群星", model.userAlbumById(1).?.artist());
+    // A folder album never had an artist; "My Music" was a stand-in.
+    try testing.expectEqualStrings("", model.userAlbumById(2).?.artist());
+}
+
+test "album page omits a running time it cannot vouch for" {
+    var model: Model = .{};
+    const album = model.addUserAlbum("A", "B").?;
+    try testing.expect(model.addUserTrackToAlbum(album, "/tmp/demo/len-1.mp3"));
+    try testing.expect(model.addUserTrackToAlbum(album, "/tmp/demo/len-2.mp3"));
+    model.user_tracks[0].duration_ms = 200_000;
+    try testing.expect(!model.albumDurationsKnown(album));
+    model.user_tracks[1].duration_ms = 100_000;
+    try testing.expect(model.albumDurationsKnown(album));
+}
+
+test "cmd+z undoes a removal and cmd+o adds songs" {
+    const z = main.onKey(.{ .key = "z", .phase = .key_down, .modifiers = .{ .super = true } });
+    try testing.expectEqual(Msg.undo_remove, z.?);
+    const o = main.onKey(.{ .key = "o", .phase = .key_down, .modifiers = .{ .super = true } });
+    try testing.expectEqual(Msg.add_music, o.?);
 }

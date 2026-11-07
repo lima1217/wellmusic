@@ -9,7 +9,9 @@
 
      Three equal-balance zones (Apple Music / Spotify convention):
        leading  — cover + title/artist (press: show the playing album)
-       center   — prev / play-pause / next (the only primary filled control)
+       center   — prev / play-pause / next (play-pause on a neutral fill:
+                  the page's one accent fill belongs to its own action,
+                  e.g. Play Album, not to a bar that is always on screen)
        trailing — shuffle, repeat, mute + volume, always-visible queue toggle
      Matching grow on the leading and trailing rows keeps the transport
      optically mid-bar; utilities stay discoverable at the trailing edge.
@@ -21,25 +23,25 @@
 <column>
   <!-- No hairline above the transport: chrome-vs-page fill already
        separates the band (shadows-over-borders). -->
-  <row height="80" padding="14" gap="16" cross="center" label="Now playing bar">
+  <row height="80" padding="14" gap="16" cross="center" label="{strNowPlaying}">
     <!-- The leading zone is one hit target: it opens the playing album
          at the playing track. -->
     <row grow="1" gap="12" cross="center" on-press="reveal_now_playing" label="{strShowNowPlaying}">
-      <avatar image="{nowPlayingCover}" width="52" height="52" radius="md" label="Now playing cover">{nowPlayingInitials}</avatar>
+      <avatar image="{nowPlayingCover}" width="52" height="52" radius="md">{nowPlayingInitials}</avatar>
       <column grow="1" gap="2">
-        <text label="Now playing title">{nowPlayingTitle}</text>
-        <text size="sm" foreground="text_muted">{nowPlayingArtist}</text>
+        <text wrap="false">{nowPlayingTitle}</text>
+        <text size="sm" wrap="false" foreground="text_muted">{nowPlayingArtist}</text>
       </column>
     </row>
-    <row gap="8" cross="center" label="Transport">
+    <row gap="8" cross="center" label="{strPlaybackControls}">
       <button variant="ghost" icon="skip-back" disabled="{idle}" on-press="prev_track" label="{strPreviousTrack}"></button>
-      <button variant="primary" icon="{playPauseIcon}" on-press="toggle_play" label="{strPlayOrPause}"></button>
+      <button variant="secondary" icon="{playPauseIcon}" on-press="toggle_play" label="{strPlayOrPause}"></button>
       <button variant="ghost" icon="skip-forward" disabled="{idle}" on-press="next_track" label="{strNextTrack}"></button>
     </row>
     <!-- Shuffle and repeat are two controls (Apple Music's pair): each
          shows its own on/off state, so nothing has to be read off a
          cycling glyph. -->
-    <row grow="1" gap="6" cross="center" main="end" label="Playback utilities">
+    <row grow="1" gap="6" cross="center" main="end" label="{strPlaybackOptions}">
       <!-- On = accent icon. The theme gives a selected ghost button no
            visible fill, so state rides the ink instead; `foreground`
            only takes literal tokens, hence an <if> pair per control.
