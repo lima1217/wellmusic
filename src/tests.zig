@@ -656,7 +656,7 @@ test "the system appearance drives the custom tokens live" {
 
     try testing.expectEqual(model_mod.ThemePreference.system, app_state.model.theme);
     try testing.expectEqualDeep(theme.light_colors, main.tokensFromModel(&app_state.model).colors);
-    const pink = canvas.Color.rgb8(207, 38, 104);
+    const pink = canvas.Color.rgb8(182, 3, 86);
     try testing.expectEqualDeep(pink, theme.light_colors.accent);
 
     try live.harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .appearance_changed = .{ .color_scheme = .dark } });
@@ -700,13 +700,25 @@ test "light and dark schemes keep page and chrome one step apart" {
     // bar read as bands. Guard both schemes so a future pack bump that
     // re-collapses them cannot silently undo the light fix. Values are
     // OKLCH L steps snapped to sRGB (see theme.zig).
-    try testing.expectEqual(canvas.Color.rgb8(240, 240, 240), theme.light_colors.background);
-    try testing.expectEqual(canvas.Color.rgb8(255, 255, 255), theme.light_colors.surface);
-    try testing.expectEqual(canvas.Color.rgb8(16, 16, 16), theme.dark_colors.background);
-    try testing.expectEqual(canvas.Color.rgb8(32, 32, 32), theme.dark_colors.surface);
+    try testing.expectEqual(canvas.Color.rgb8(243, 239, 235), theme.light_colors.background);
+    try testing.expectEqual(canvas.Color.rgb8(255, 255, 253), theme.light_colors.surface);
+    try testing.expectEqual(canvas.Color.rgb8(18, 16, 14), theme.dark_colors.background);
+    try testing.expectEqual(canvas.Color.rgb8(34, 32, 29), theme.dark_colors.surface);
     // Body ink keeps an honest lightness gap on the lifted page.
-    try testing.expectEqual(canvas.Color.rgb8(22, 22, 22), theme.light_colors.text);
-    try testing.expectEqual(canvas.Color.rgb8(238, 238, 238), theme.dark_colors.text);
+    try testing.expectEqual(canvas.Color.rgb8(24, 22, 19), theme.light_colors.text);
+    try testing.expectEqual(canvas.Color.rgb8(241, 238, 234), theme.dark_colors.text);
+}
+
+test "every gray the app paints leans warm, never blue" {
+    // Warm = red ≥ green ≥ blue with a small red–blue spread; a blue-gray
+    // (blue above red) is exactly what the palette rules out.
+    for ([_]@TypeOf(theme.light_colors){ theme.light_colors, theme.dark_colors }) |colors| {
+        for ([_]canvas.Color{ colors.background, colors.surface_subtle, colors.surface_pressed, colors.text, colors.text_muted }) |gray| {
+            try testing.expect(gray.r >= gray.g and gray.g >= gray.b);
+            const spread = gray.r - gray.b;
+            try testing.expect(spread >= 2.5 / 255.0 and spread <= 10.5 / 255.0);
+        }
+    }
 }
 
 test "without a loaded UI face tokens keep the pack default font" {
@@ -2034,7 +2046,7 @@ test "a full library names the limit rather than a copy failure" {
     }
     try testing.expect(!model_mod.queueImport(&model, model_mod.imported_album_id, "/tmp/demo/one-more.mp3"));
     model_mod.pumpImport(&model, &fx);
-    try testing.expectEqualStrings("No songs added: 1 left out because the library is full (240 songs max)", try arenaText(&model));
+    try testing.expectEqualStrings("No songs added: 1 over the 240-song limit", try arenaText(&model));
 }
 
 test "album initials keep whole characters for CJK titles" {

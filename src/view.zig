@@ -183,7 +183,11 @@ fn headerBand(ui: *Ui, model: *const Model) Ui.Node {
             // the side room is a fixed-width empty stack each way.
             // (`ui.spacer(n)` is a GROW factor, not a width.)
             ui.el(.stack, .{ .width = notice_side_inset + model.chrome_leading }, .{}),
-            ui.text(.{ .size = .sm, .grow = 1, .wrap = false, .text_alignment = .center, .style_tokens = .{ .foreground = .text_muted } }, status),
+            // Wraps to a second line rather than clipping: an add that
+            // skipped files for several reasons is the longest copy in the
+            // app, and the minimum window leaves it ~500pt (rule: reword or
+            // wrap, never cut off).
+            ui.text(.{ .size = .sm, .grow = 1, .wrap = true, .text_alignment = .center, .style_tokens = .{ .foreground = .text_muted } }, status),
             if (model.noticeCanUndo())
                 ui.button(.{ .variant = .ghost, .size = .sm, .on_press = .undo_remove }, model.str(.undo))
             else
@@ -433,12 +437,12 @@ fn emptyState(ui: *Ui, model: *const Model) Ui.Node {
         .semantics = .{ .label = model.str(.library_empty) },
     }, .{
         boldText(ui, model.str(.library_empty)),
-        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.library_empty_hint)),
         ui.row(.{ .gap = 8, .cross = .center }, .{
             ui.button(.{ .variant = .primary, .icon = "music", .on_press = .add_music }, model.str(.add_song)),
             ui.button(.{ .variant = .secondary, .icon = "folder", .on_press = .import_album }, model.str(.add_album)),
             ui.spacer(1),
         }),
+        ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.str(.library_empty_hint)),
     });
 }
 

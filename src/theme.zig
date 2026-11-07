@@ -13,17 +13,21 @@ const ui_font = @import("ui_font.zig");
 const canvas = native_sdk.canvas;
 const Color = canvas.Color;
 
-/// Brand pink solid fill. Authored in OKLCH so hue stays stable across
-/// lightness (HSL's 336° drifts ~12° toward red here) and chroma stays
-/// inside sRGB: oklch(0.565 0.205 4) = #cf2668. One constant serves
-/// light and dark alike — only the quiet low steps flip per scheme.
-const pink_800 = Color.rgb8(207, 38, 104);
+/// The accent, one hue (OKLCH h = 4°, a raspberry pink) at two
+/// lightnesses. It is used as TEXT (the playing song's title) as well as
+/// a fill, so each scheme takes the step that reads as text there — the
+/// old single #cf2668 measured 4.46:1 on the light page and 3.74:1 on
+/// the dark one, both under the 4.5:1 text bar. Numbers:
+/// docs/review/scripts/color_audit.py.
+///   light: oklch(0.50 0.20 4) = #b60356 — 5.9:1 on page, 6.7:1 under white
+///   dark:  oklch(0.72 0.17 4) = #f87098 — 7.0:1 on page, 7.0:1 under ink
+const pink_800 = Color.rgb8(182, 3, 86);
+const pink_dark = Color.rgb8(248, 112, 152);
 
-/// The ink on the pink fill: the pack pairs every solid fill with white
-/// knockout text. White clears ~5.1:1 on this pink — the honest
-/// readable ink in both schemes, since the fill itself is the same
-/// under both.
+/// The ink on the accent fill: white on the deep light-scheme pink, the
+/// warm near-black page on the light dark-scheme pink.
 const pink_ink = Color.rgb8(255, 255, 255);
+const pink_ink_dark = Color.rgb8(18, 16, 14);
 
 /// Cover-art outline: pure black/white at ~10% alpha — never a tinted
 /// neutral from the palette. A tinted hairline picks up the surface
@@ -51,35 +55,39 @@ const slider_outline_dark = Color.rgba8(255, 255, 255, 26);
 const knockout_light = Color.rgb8(255, 255, 255);
 const knockout_dark = Color.rgb8(0, 0, 0);
 
-/// Elevation neutrals, authored as OKLCH lightness steps (C = 0) then
-/// snapped to sRGB. Equal L gaps keep page → chrome → wash → press
-/// reading as one ladder in both schemes (~0.05–0.07 between rungs).
+/// Elevation neutrals: WARM grays. Same OKLCH lightness ladder as before,
+/// now with a trace of chroma at a paper-like hue (C ≈ 0.006–0.007,
+/// h = 75°) instead of C = 0. Pure-neutral grays read cold next to cover
+/// art; this tint is below what reads as "beige" but enough to warm the
+/// page. Equal L gaps keep page → chrome → wash → press one ladder.
 ///
-/// Dark (music-library charcoal, not OLED void):
-///   page    oklch(0.175 0 0) → #101010
-///   chrome  oklch(0.245 0 0) → #202020
-///   subtle  oklch(0.300 0 0) → #2e2e2e
-///   pressed oklch(0.360 0 0) → #3d3d3d
-const dark_page = Color.rgb8(16, 16, 16);
-const dark_chrome = Color.rgb8(32, 32, 32);
-const dark_subtle = Color.rgb8(46, 46, 46);
-const dark_pressed = Color.rgb8(61, 61, 61);
-/// Dark ink: body L≥0.75 on page L≈0.18; muted keeps secondary quieter.
-const dark_text = Color.rgb8(238, 238, 238); // oklch(0.950 0 0)
-const dark_text_muted = Color.rgb8(164, 164, 164); // oklch(0.720 0 0)
+/// Dark (charcoal, not OLED void), C = 0.006:
+///   page    oklch(0.175) → #12100e
+///   chrome  oklch(0.245) → #22201d
+///   subtle  oklch(0.290) → #2d2b28
+///   pressed oklch(0.330) → #373532   (selected row: the playing title's
+///                                    pink still clears 4.5:1 on it)
+const dark_page = Color.rgb8(18, 16, 14);
+const dark_chrome = Color.rgb8(34, 32, 29);
+const dark_subtle = Color.rgb8(45, 43, 40);
+const dark_pressed = Color.rgb8(55, 53, 50);
+/// Dark ink: muted lifted to L 0.76 so it clears 4.5:1 on a selected row
+/// too (L 0.72 measured 4.36:1 there).
+const dark_text = Color.rgb8(241, 238, 234); // oklch(0.950 0.006 75)
+const dark_text_muted = Color.rgb8(179, 177, 173); // oklch(0.760 0.006 75)
 
-/// Light (soft gray page under white chrome — Apple Music / Finder):
-///   page    oklch(0.955 0 0) → #f0f0f0
-///   chrome  oklch(1.000 0 0) → #ffffff
-///   subtle  oklch(0.920 0 0) → #e4e4e4
-///   pressed oklch(0.880 0 0) → #d7d7d7
-const light_page = Color.rgb8(240, 240, 240);
-const light_chrome = Color.rgb8(255, 255, 255);
-const light_subtle = Color.rgb8(228, 228, 228);
-const light_pressed = Color.rgb8(215, 215, 215);
-/// Light ink: body L≤0.45 on page L≈0.96.
-const light_text = Color.rgb8(22, 22, 22); // oklch(0.200 0 0)
-const light_text_muted = Color.rgb8(72, 72, 72); // oklch(0.400 0 0)
+/// Light (warm paper page under near-white chrome), C = 0.007:
+///   page    oklch(0.955) → #f3efeb
+///   chrome  oklch(1.000, C 0.003) → #fffffd
+///   subtle  oklch(0.920) → #e7e4df
+///   pressed oklch(0.880) → #dad7d2
+const light_page = Color.rgb8(243, 239, 235);
+const light_chrome = Color.rgb8(255, 255, 253);
+const light_subtle = Color.rgb8(231, 228, 223);
+const light_pressed = Color.rgb8(218, 215, 210);
+/// Light ink.
+const light_text = Color.rgb8(24, 22, 19); // oklch(0.200 0.007 75)
+const light_text_muted = Color.rgb8(74, 71, 68); // oklch(0.400 0.007 75)
 
 /// The app's one brand statement, layered over whichever scheme/contrast
 /// register the pack resolves. Identity slots plus the fluid-feel pair:
@@ -126,9 +134,18 @@ const light_text_muted = Color.rgb8(72, 72, 72); // oklch(0.400 0 0)
 fn accentOverridesFor(color_scheme: canvas.ColorScheme) canvas.DesignTokenOverrides {
     return .{
         .colors = .{
-            .accent = pink_800,
-            .accent_text = pink_ink,
-            .focus_ring = canvas.accentFocusRing(pink_800, color_scheme),
+            .accent = switch (color_scheme) {
+                .light => pink_800,
+                .dark => pink_dark,
+            },
+            .accent_text = switch (color_scheme) {
+                .light => pink_ink,
+                .dark => pink_ink_dark,
+            },
+            .focus_ring = canvas.accentFocusRing(switch (color_scheme) {
+                .light => pink_800,
+                .dark => pink_dark,
+            }, color_scheme),
             .background = switch (color_scheme) {
                 .light => light_page,
                 .dark => dark_page,
@@ -165,7 +182,12 @@ fn accentOverridesFor(color_scheme: canvas.ColorScheme) canvas.DesignTokenOverri
         },
         .controls = .{
             .slider = .{
-                .active_background = pink_800,
+                // Volume is a level, not a state: a neutral fill keeps
+                // the accent for what is ON (shuffle, repeat, playing).
+                .active_background = switch (color_scheme) {
+                    .light => light_text_muted,
+                    .dark => dark_text_muted,
+                },
                 .border = switch (color_scheme) {
                     .light => slider_outline_light,
                     .dark => slider_outline_dark,

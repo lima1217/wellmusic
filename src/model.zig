@@ -1140,7 +1140,8 @@ pub const Model = struct {
 
     pub fn nowPlayingArtist(model: *const Model) []const u8 {
         if (model.assets_missing) return model.str(.cannot_play_hint);
-        const track = model.nowTrack() orelse return model.str(.pick_to_start);
+        // "Double-click a song" only once there is a song to click.
+        const track = model.nowTrack() orelse return if (model.user_track_count > 0) model.str(.pick_to_start) else "";
         if (track.artist.len > 0) return track.artist;
         const album = model.userAlbumById(track.album) orelse return "";
         return album.artist();

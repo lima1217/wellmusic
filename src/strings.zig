@@ -286,7 +286,7 @@ pub fn importResult(arena: std.mem.Allocator, lang: Lang, c: ImportCounts) []con
                 n += 1;
             }
             if (c.full > 0) {
-                parts[n] = std.fmt.allocPrint(arena, "{d} left out because the library is full ({d} songs max)", .{ c.full, c.capacity }) catch "";
+                parts[n] = std.fmt.allocPrint(arena, "{d} over the {d}-song limit", .{ c.full, c.capacity }) catch "";
                 n += 1;
             }
             const lead = if (c.added > 0)
