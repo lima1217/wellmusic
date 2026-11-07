@@ -23,11 +23,11 @@
 <column>
   <!-- No hairline above the transport: chrome-vs-page fill already
        separates the band (shadows-over-borders). -->
-  <row height="80" padding="14" gap="16" cross="center" label="{strNowPlaying}">
+  <row height="80" padding="16" gap="16" cross="center" label="{strNowPlaying}">
     <!-- The leading zone is one hit target: it opens the playing album
          at the playing track. -->
     <row grow="1" gap="12" cross="center" on-press="reveal_now_playing" label="{strShowNowPlaying}">
-      <avatar image="{nowPlayingCover}" width="52" height="52" radius="md">{nowPlayingInitials}</avatar>
+      <avatar image="{nowPlayingCover}" width="48" height="48" radius="md">{nowPlayingInitials}</avatar>
       <column grow="1" gap="2">
         <text wrap="false">{nowPlayingTitle}</text>
         <text size="sm" wrap="false" foreground="text_muted">{nowPlayingArtist}</text>
@@ -41,7 +41,7 @@
     <!-- Shuffle and repeat are two controls (Apple Music's pair): each
          shows its own on/off state, so nothing has to be read off a
          cycling glyph. -->
-    <row grow="1" gap="6" cross="center" main="end" label="{strPlaybackOptions}">
+    <row grow="1" gap="8" cross="center" main="end" label="{strPlaybackOptions}">
       <!-- On = accent icon. The theme gives a selected ghost button no
            visible fill, so state rides the ink instead; `foreground`
            only takes literal tokens, hence an <if> pair per control.

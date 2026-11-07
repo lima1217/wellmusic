@@ -2,11 +2,9 @@
 
 Generated from `src/view.zig` and the `.native` markup: every literal size the UI states, and how often. Colors live in [color-audit.md](color-audit.md).
 
-- **gap**: `8`×6, `4`×4, `6`×3, `1`×3, `12`×3, `10`×2, `20`×2, `2`×2, `14`×1, `0`×1, `24`×1, `16`×1
-- **padding**: `12`×2, `20`×1, `8`×1, `4`×1, `24`×1, `10`×1, `14`×1
-- **height**: `14`×2, `40`×1, `12`×1, `44`×1, `80`×1, `52`×1
-- **width**: `0`×2, `24`×2, `14`×2, `420`×1, `12`×1, `16`×1, `2`×1, `56`×1, `52`×1, `88`×1, `8`×1
-- **radius**: `0`×2
+**Spacing scale** (`src/view.zig`, `src/*.native`): every gap and padding is one of **2** (between two lines of one text block), **4, 8, 12, 16, 24** (24 = page inset). Before this pass the views used eleven values: 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24.
+
+Fixed sizes that are not spacing: row heights 40 (queue) / 44 (songs) / 80 (now-playing bar), cover 200 (album page) / 48 (bar), dialog width 420, volume slider 88, duration column 56, number column 24.
 
 ## Type sizes per screen (rule: ≤ 4)
 
@@ -23,7 +21,7 @@ Hierarchy comes from weight and the one display size; no screen exceeds three si
 
 ## Radii (concentric rule: inner = outer − inset)
 
-- Album tile wash `tile_radius = cover_radius + tile_padding` = 10 + 6 = 16 → concentric with the 10pt cover. ✔
+- Album tile wash `tile_radius = cover_radius + tile_padding` = 10 + 8 = 18 → concentric with the 10pt cover. ✔
 - Detail cover 10pt = grid cover 10pt. ✔
 - Now-playing cover `radius="md"`; it is not nested in a rounded parent. ✔
 

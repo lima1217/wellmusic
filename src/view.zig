@@ -42,11 +42,11 @@ const min_tile_width: f32 = 232;
 /// with no card chrome the gap IS the whole separation between covers,
 /// and the bare music-library register reads best with covers closer
 /// together than boxed cards were.
-const grid_gap: f32 = 10;
+const grid_gap: f32 = 12;
 /// Inset between the tile's hover/press wash and the cover art: on a
 /// bare tile the wash must show AROUND the art to read at all (the art
 /// would paint over a same-sized wash), so each tile keeps a thin halo.
-const tile_padding: f32 = 6;
+const tile_padding: f32 = 8;
 /// Cover corner radius on album tiles. Soft enough to read as music
 /// artwork (Apple Music ~10pt), not a sharp card. The tile's press/focus
 /// wash uses `tile_radius` so the nested arcs stay concentric
@@ -54,12 +54,18 @@ const tile_padding: f32 = 6;
 const cover_radius: f32 = 10;
 const tile_radius: f32 = cover_radius + tile_padding;
 /// Vertical gap between the cover and the title/artist block.
-const cover_text_gap: f32 = 6;
+const cover_text_gap: f32 = 8;
 /// The title + artist block's height (one body line over one small
 /// line), used to derive the tile's total height from its width.
 const tile_text_height: f32 = 36;
 const detail_cover_size: f32 = 200;
 const content_padding: f32 = 24;
+
+// Spacing scale. Every gap and padding in the views is one of these:
+//   2  — between two lines of one text block (title over artist)
+//   4, 8, 12, 16, 24 — everything else (24 = page inset)
+// It used to be eleven different values (1, 2, 4, 6, 8, 10, 12, 14, 16,
+// 20, 24), so neighbouring screens never quite lined up.
 
 /// The width→columns rule, answered for one canvas width.
 pub const GridFit = struct {
@@ -120,13 +126,13 @@ fn editDialog(ui: *Ui, model: *const Model, kind: EditKind) Ui.Node {
     const artist_label = model.str(.artist);
     return ui.el(.dialog, .{
         .width = 420,
-        .padding = 20,
+        .padding = content_padding,
         .on_dismiss = close,
         .semantics = .{ .label = heading },
     }, .{
-        ui.column(.{ .gap = 14 }, .{
+        ui.column(.{ .gap = 16 }, .{
             boldText(ui, heading),
-            ui.column(.{ .gap = 6 }, .{
+            ui.column(.{ .gap = 8 }, .{
                 ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, title_label),
                 ui.textField(.{
                     .text = model.editTitle(),
@@ -137,7 +143,7 @@ fn editDialog(ui: *Ui, model: *const Model, kind: EditKind) Ui.Node {
                     .semantics = .{ .label = title_label },
                 }),
             }),
-            ui.column(.{ .gap = 6 }, .{
+            ui.column(.{ .gap = 8 }, .{
                 ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, artist_label),
                 ui.textField(.{
                     .text = model.editArtist(),
@@ -280,14 +286,14 @@ fn queueRow(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui.Nod
         // 40pt: the desktop hit-area floor, clearing the × button.
         .height = 40,
         .padding = 4,
-        .gap = 10,
+        .gap = 12,
         .cross = .center,
         .on_press = Msg{ .play_track = row.id },
         .context_menu = menu,
         .semantics = .{ .role = .listitem, .label = strings.songLabel(ui.arena, model.lang, row.title, row.artist) },
     }, .{
         trackIndicator(ui, row),
-        ui.column(.{ .gap = 1, .grow = 1 }, .{
+        ui.column(.{ .gap = 2, .grow = 1 }, .{
             ui.text(.{ .wrap = false, .style_tokens = if (row.now) .{ .foreground = .accent } else .{} }, row.title),
             ui.text(.{ .size = .sm, .wrap = false, .style_tokens = .{ .foreground = .text_muted } }, row.subtitle),
         }),
@@ -323,7 +329,7 @@ fn albumGridView(ui: *Ui, model: *const Model) Ui.Node {
         .grow = 1,
         .value = model.grid_scroll,
         .semantics = .{ .label = model.str(.album_grid) },
-    }, ui.column(.{ .padding = content_padding, .gap = 20 }, .{
+    }, ui.column(.{ .padding = content_padding, .gap = 24 }, .{
         if (cells.len == 0) emptyState(ui, model) else albumGrid(ui, model, gridFit(model.canvas_width), cells),
     }));
 }
@@ -397,7 +403,7 @@ fn albumTile(ui: *Ui, ctx: TileCtx, cell: *const model_mod.AlbumCell) Ui.Node {
                 .style = .{ .radius = cover_radius },
                 .semantics = .{ .label = strings.coverLabel(ui.arena, model.lang, cell.title) },
             }, cell.initials),
-            ui.column(.{ .gap = 1 }, .{
+            ui.column(.{ .gap = 2 }, .{
                 // One-line title/artist by design: elide behind a
                 // trailing ellipsis at the tile width, never wrap
                 // over the line below.
@@ -471,7 +477,7 @@ fn albumDetailView(ui: *Ui, model: *const Model, album_id: u8) Ui.Node {
         }, ui.column(.{ .padding = content_padding, .gap = 16 }, .{
             ui.row(.{}, .{ backButton(ui, model), ui.spacer(1) }),
             detailCover(ui, model, album, detail_cover_size),
-            ui.column(.{ .gap = 6 }, .{
+            ui.column(.{ .gap = 8 }, .{
                 AlbumTitleView.build(ui, model),
                 if (album.artist.len > 0) ui.text(.{}, album.artist) else ui.el(.stack, .{}, .{}),
             }),
@@ -609,7 +615,7 @@ fn trackRowView(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui
     return ui.el(.list_item, .{
         .global_key = canvas.uiKey(@as(u32, row.id)),
         .height = 44,
-        .padding = 10,
+        .padding = 12,
         .gap = 12,
         .cross = .center,
         .selected = row.selected,
@@ -629,7 +635,7 @@ fn trackRowView(ui: *Ui, model: *const Model, row: *const model_mod.TrackRow) Ui
         if (row.subtitle.len == 0)
             ui.text(.{ .grow = 1, .style_tokens = rowTitleTokens(row) }, row.title)
         else
-            ui.column(.{ .gap = 1, .grow = 1 }, .{
+            ui.column(.{ .gap = 2, .grow = 1 }, .{
                 ui.text(.{ .style_tokens = rowTitleTokens(row) }, row.title),
                 ui.text(.{ .size = .sm, .style_tokens = rowMutedTokens(row) }, row.subtitle),
             }),

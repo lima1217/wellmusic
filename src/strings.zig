@@ -78,6 +78,7 @@ pub const Key = enum {
     undo,
     dismiss,
     notice,
+    cover_needs_album,
     // File dialogs
     dialog_add_music,
     dialog_import_album,
@@ -162,6 +163,7 @@ const table = std.enums.EnumArray(Key, Pair).init(.{
     .undo = .{ .en = "Undo", .zh = "撤销" },
     .dismiss = .{ .en = "Dismiss", .zh = "关闭" },
     .notice = .{ .en = "Status", .zh = "状态" },
+    .cover_needs_album = .{ .en = "To set a cover, open an album and drop the image there.", .zh = "要设置封面，请先打开专辑，再把图片拖进来。" },
     .dialog_add_music = .{ .en = "Add Songs", .zh = "添加歌曲" },
     .dialog_import_album = .{ .en = "Choose a Folder to Add as an Album", .zh = "选择要添加为专辑的文件夹" },
     .dialog_choose_cover = .{ .en = "Choose a Cover Image", .zh = "选择封面图片" },

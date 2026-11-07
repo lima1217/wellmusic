@@ -88,7 +88,7 @@ pub const max_cover_file_bytes: usize = 32 * 1024 * 1024;
 /// 4096² RGBA ≈ 64 MiB temporary decode scratch.
 pub const max_cover_decode_edge: usize = 4096;
 /// Longest edge registered into the canvas image slot. Half the SDK
-/// 512² avatar budget: album tiles and the 52pt now-playing cover do
+/// 512² avatar budget: album tiles and the 48pt now-playing cover do
 /// not need full-res pixels, and 256² cuts texture RSS ~4×.
 pub const max_cover_register_edge: usize = 256;
 /// Background import: one `/bin/cp` at a time copies a picked file into
@@ -1035,6 +1035,7 @@ pub const Model = struct {
                 .capacity = max_user_tracks,
             }),
             .albums_full => strings.albumsFull(arena, model.lang, max_user_albums),
+            .cover_needs_album => model.str(.cover_needs_album),
             .removed => strings.removedTracks(arena, model.lang, model.notice_removed),
             .skipped => strings.skippedTrack(arena, model.lang, model.skippedTitle()),
         };
@@ -2865,7 +2866,7 @@ pub fn loadCoverFromPath(model: *Model, fx: *Effects, album_id: u8) bool {
 
 /// The one-line notice under the header: an import's result, or a
 /// removal with Undo. Clears itself after a few seconds.
-pub const Notice = enum { none, import_result, removed, skipped, albums_full };
+pub const Notice = enum { none, import_result, removed, skipped, albums_full, cover_needs_album };
 pub const notice_timer_key: u64 = 45;
 /// A clean add reads at a glance; one that left songs out carries reasons
 /// and needs time to read (WCAG 2.2.1: give people enough time). Undo gets
@@ -3082,6 +3083,7 @@ fn importDropped(model: *Model, fx: *Effects) void {
     var lines = std.mem.splitScalar(u8, staged[0..len], '\n');
     var queued_loose = false;
     var cover_set = false;
+    var image_without_album = false;
     while (lines.next()) |path| {
         if (path.len == 0) continue;
         if (isImagePath(path)) {
@@ -3089,6 +3091,8 @@ fn importDropped(model: *Model, fx: *Effects) void {
                 if (model.open_album) |album_id| {
                     setCoverFromDrop(model, fx, album_id, path);
                     cover_set = true;
+                } else {
+                    image_without_album = true;
                 }
             }
         } else if (isDirectory(path)) {
@@ -3100,6 +3104,14 @@ fn importDropped(model: *Model, fx: *Effects) void {
         }
     }
     if (queued_loose) persistLibrary(model, fx);
+    // An image is a cover, and a cover needs an album: dropped on the
+    // album grid it used to vanish without a word. Say where it goes —
+    // unless songs came along, whose own summary takes the line.
+    if (image_without_album and model.import_total == 0 and
+        model.import_added + model.import_skipped + model.import_failed + model.import_unsupported + model.import_full == 0)
+    {
+        showNotice(model, fx, .cover_needs_album, notice_import_problem_ms);
+    }
     pumpImport(model, fx);
 }
 

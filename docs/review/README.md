@@ -33,9 +33,9 @@ Branch `review/novice-copy-visual`. Everything here was measured on the app, not
 | 1 | "Album" eyebrow over an album title; "Playlist · 1". | Fixed. |
 | 1 | Grays were pure neutral (C = 0). | Fixed — warm (C ≈ 0.007, h 75°); a test rules out blue-leaning grays. |
 | 1 | At the minimum window (1056×640) the album page showed only ~4 songs under a 200pt cover. | Fixed — split layout (option C of three in [album-page-options.pdf](album-page-options.pdf)): identity in a fixed left column, Play/Shuffle/count fixed above the songs, only songs scroll. ~9 songs at the minimum window; Cmd+L reveal re-verified. |
-| 1 | Spacing values are scattered (gaps 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24). | **Not fixed.** Collapsing to a 4-pt scale touches every view; separate pass. |
+| 1 | Spacing values were scattered (gaps 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24). | Fixed — one scale: 2 (between two lines of one text block), 4, 8, 12, 16, 24. Tile wash radius stays concentric (10 + 8 = 18); the now-playing cover is 48pt so the 80pt bar keeps 16pt padding. Built, not re-tested or re-screenshotted. |
 | 1 | Repeat defaults to "All" on first launch (Apple Music defaults to off). | **Not changed** — a product decision, not a defect. |
-| 1 | An image dropped while no album is open is ignored silently. | **Not fixed.** |
+| 1 | An image dropped while no album is open was ignored silently. | Fixed — the header says to open an album and drop the image there (要设置封面，请先打开专辑，再把图片拖进来). Built, not re-tested. |
 
 ## What this did not verify
 
